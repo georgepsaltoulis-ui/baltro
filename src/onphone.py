@@ -62,8 +62,10 @@ WIRELESS_HELP = ("""[!] On the phone the bot works through Android's "Wireless d
 
 ADDRESS_HELP = ("""[!] On the phone the bot works through Android's "Wireless debugging" (Android 11 or newer):
 """ + WIRELESS_STEPS + """
-    4. Tap "Wireless debugging" to open it. Under "IP address & Port" it shows something like
-       192.168.1.23:41234 - type that here (split screen helps to see both).""")
+    4. Tap the words "Wireless debugging" (not the switch) to open it. At the top, under "IP address
+       & Port", it shows something like 192.168.1.23:41234 - type that here (split screen helps).
+       Not there? Wireless debugging only switches on while the phone is on Wi-Fi (not mobile data).
+       (Not 127.0.0.1: in here that's this Linux itself, not the phone.)""")
 
 PAIR_HELP = """[!] Wireless debugging is on. adb here has to be allowed once, like a computer (pairing):
     1. Put Settings and this terminal side by side (split screen or pop-up view) so you can see both.
@@ -94,15 +96,22 @@ def adb_too_old(adb):
     return m.group(0) if m and int(m.group(1)) < 30 else None
 
 
+_found_host = []   # VM: where Android answered this run without a typed address (the VM's gateway;
+                   # not saved: the VM's addresses can change when the Terminal app restarts)
+
 def phone_host():
-    """Where the phone's adbd is: 127.0.0.1 in Termux, its Wi-Fi IP from the Terminal app's VM."""
+    """Where the phone's adbd is: 127.0.0.1 in Termux; from the Terminal app's VM its Wi-Fi IP
+    (typed in once, saved) or the VM's gateway if Android answers there."""
     if not VM:
         return "127.0.0.1"
     try:
         with open(ADDRESS_FILE) as f:
-            return f.read().strip() or None
+            saved = f.read().strip()
+        if saved:
+            return saved
     except OSError:
-        return None
+        pass
+    return _found_host[-1] if _found_host else None
 
 
 def _save_host(ip):
@@ -192,6 +201,43 @@ def _ready(adb, serial, wait=8.0):
     return False
 
 
+def _gateway():
+    """The Linux VM's default gateway, i.e. Android itself as seen from the Terminal app."""
+    try:
+        with open("/proc/net/route") as f:
+            for line in f.readlines()[1:]:
+                parts = line.split()
+                if len(parts) > 2 and parts[1] == "00000000" and parts[2] != "00000000":
+                    return socket.inet_ntoa(struct.pack("<L", int(parts[2], 16)))
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+_gateway_tried = []
+
+def _phone_at_gateway():
+    """VM, phone's Wi-Fi IP not known yet: Android may answer right at the VM's gateway, then
+    nobody has to type an address. Looked at once per run (a full port search)."""
+    gw = _gateway() if VM and not _gateway_tried else None
+    _gateway_tried.append(gw)
+    if gw:
+        for port in _open_ports(gw):
+            if _is_adbd(gw, port):
+                _found_host.append(gw)
+                _port_hint[gw] = port
+                return gw
+    return None
+
+
+def _remember(ip):
+    """Save where the phone is - unless that's the VM's gateway (found again every run)."""
+    if ip == _gateway():
+        _found_host.append(ip)
+    else:
+        _save_host(ip)
+
+
 def try_connect(adb):
     """One attempt. (serial, None) when connected; otherwise (None, why): "address" = the phone's
     Wi-Fi IP isn't known yet (VM), "off" = no wireless debugging found, "pair" = it's on but adb
@@ -200,10 +246,12 @@ def try_connect(adb):
     serial = connected(adb, host)
     if serial:
         if host is None:
-            _save_host(serial.rsplit(":", 1)[0])    # connected by hand: remember where the phone is
+            _remember(serial.rsplit(":", 1)[0])     # connected by hand: remember where the phone is
         return serial, None
     if host is None:
-        return None, "address"
+        host = _phone_at_gateway()
+        if host is None:
+            return None, "address"
     hint = _port_hint.pop(host, None)
     ports = [hint] if hint and _is_adbd(host, hint) else [p for p in _open_ports(host) if _is_adbd(host, p)]
     unpaired = False
@@ -232,6 +280,10 @@ def ask_address(explain=True):
     if explain:
         print(ADDRESS_HELP)
     ip, port = _parse_address(_ask("    IP address & Port (e.g. 192.168.1.23:41234; Enter = look again): "))
+    if ip and ip.startswith("127."):
+        print("[-] 127.x.x.x is this Linux itself, not the phone: it needs the phone's Wi-Fi address,"
+              " like 192.168.1.23.")
+        return
     if ip is None and port is not None and phone_host():
         ip = phone_host()                   # only the port typed: same phone as before
     if ip is None:
@@ -254,7 +306,7 @@ def pair(adb, explain=True):
     out = _adb(adb, "pair", f"{host}:{port}", code, timeout=30)
     if "Successfully paired" in out:
         if VM:
-            _save_host(host)
+            _remember(host)
         print("[+] Paired: from now on the bot connects to this phone by itself.")
         return True
     print(f"[-] Pairing didn't work ({out or 'no answer'}). Tap the pairing option again for a new code.")

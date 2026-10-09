@@ -41,15 +41,16 @@ It also finishes any install that was cut short. It unpacks itself into `~/Arrow
 install Debian's own `python3-opencv`: it pulls in hundreds of MB of extras and takes a very long
 time.
 
-The bot reaches the phone through its own **Wireless debugging** (Developer options; it needs
-Wi-Fi but not internet):
+The bot reaches the phone through its own **Wireless debugging** (Developer options). Wireless
+debugging only switches on while the phone is on **Wi-Fi**, not mobile data; it doesn't need
+internet.
 
-1. The first time, the bot explains how to turn Wireless debugging on. It asks you to type the
-   *IP address & Port* that Wireless debugging shows.
-2. It then asks you to pair once: tap *Pair device with pairing code* and type the address and
-   code shown there. Split screen (Settings next to the Terminal) makes this easy.
-3. After that it finds the phone by itself and opens the game. If it can't (for example on another
-   Wi-Fi network), it asks for the address again.
+1. The bot first tries to find the phone by itself. If it can't, it asks for the *IP address & Port*:
+   tap the words *Wireless debugging* (not the switch) and it's at the top of that screen. Don't use
+   `127.0.0.1`: in the Terminal app that's its own Linux, not the phone.
+2. It asks you to pair once: tap *Pair device with pairing code* and type the address and code
+   shown there. Split screen (Settings next to the Terminal) makes this easy.
+3. After that it connects by itself and opens the game.
 
 Tips:
 
@@ -59,12 +60,9 @@ Tips:
   newer one.
 - **`/mnt/shared` is empty:** give the Terminal app access to your files in Android's settings.
 
-Termux works as well. In Termux, run:
-
-```sh
-pkg install python android-tools python-numpy opencv-python python-pillow python-lxml
-pip install uiautomator2
-```
+Termux works as well, and there it never needs an address (it uses `127.0.0.1`). Install Termux,
+then run `pkg install python` and `python ArrowBot.py`. The bot installs the rest itself. Without
+PyAV it looks at the screen through screenshots, which is slower than live video.
 
 ## On a computer (Windows)
 

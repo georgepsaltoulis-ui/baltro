@@ -29,8 +29,8 @@ The bot works through the phone's own "Wireless debugging" (Developer options, A
 Wi-Fi, not internet). The first time it shows how to turn that on and asks for the address and
 pairing code it shows; after that it connects by itself and opens the game. To stop it, tap the
 "Arrow bot is playing" notification. Opening the Terminal app pauses it (ESC there stops it).
-(Termux works too: pkg install python android-tools python-numpy opencv-python python-pillow
-python-lxml, pip install uiautomator2.)
+Termux works too (no address to type there): pkg install python, then python ArrowBot.py - it
+installs the rest itself (android-tools, opencv-python, ... with pkg).
 """
 import base64, io, os, runpy, shutil, subprocess, sys, zipfile
 
@@ -170,8 +170,19 @@ DEBIAN_PIP = ["--user", "--break-system-packages", "--no-warn-script-location"]
 DEBIAN_NAMES = {"cv2": "opencv-python-headless"}
 
 
+TERMUX_PKG = {"numpy": ["python-numpy"], "cv2": ["opencv-python"], "uiautomator2": ["python-lxml", "python-pillow"]}
+
+
 def _need(mods, phone=None):
     """phone: None on a computer, else "termux" / "debian" (what gets installed, which hints fit)."""
+    if phone == "termux":
+        # Termux has these prebuilt (pip would have to compile them); uiautomator2 itself comes from pip
+        want = [p for m in mods if not _importable(m) for p in TERMUX_PKG.get(m, [])]
+        if want:
+            print(f"[*] Installing {' '.join(want)} (pkg install) ...")
+            subprocess.run(["pkg", "install", "-y", *want])
+            import importlib
+            importlib.invalidate_caches()
     if phone == "debian":
         auto = [m for m in mods + ["av"] if not _importable(m)]      # everything (av for live video)
     else:
@@ -232,6 +243,13 @@ def _debian_setup():
               "      sudo apt-get update && sudo apt-get install -y --no-install-recommends adb python3-pip\n"
               "    then run this again.")
         sys.exit(1)
+
+
+def _termux_setup():
+    """Termux: put adb on with pkg (android-tools) if it's missing."""
+    if shutil.which("adb") is None:
+        print("[*] Installing adb (pkg install android-tools) ...")
+        subprocess.run(["pkg", "install", "-y", "android-tools"])
 
 
 def _check_adb(help_text=ADB_HELP):
@@ -337,7 +355,9 @@ def main():
     import onphone
     if onphone.ON_PHONE:
         # no computer: adb here connects to the phone's own wireless debugging (onphone.py)
-        if not onphone.IN_TERMUX:
+        if onphone.IN_TERMUX:
+            _termux_setup()
+        else:
             _debian_setup()
         _need(["numpy", "cv2", "uiautomator2"], "termux" if onphone.IN_TERMUX else "debian")
         adb = _check_adb(onphone.ADB_HELP)
