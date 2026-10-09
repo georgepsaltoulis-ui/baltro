@@ -22,10 +22,9 @@ next to this file (again only when this file changes). Needs Python 3 with:
 
 ON THE PHONE (no computer) in Android's Terminal app: Settings > System > Developer options >
 "Linux development environment" on, open the Terminal app, put ArrowBot.py in Downloads, then:
-    sudo apt update && sudo apt install -y --no-install-recommends adb python3-pip
-    cp /mnt/shared/ArrowBot.py ~ && python3 ArrowBot.py
-(the first start installs the Python packages it needs with pip: opencv-python-headless, numpy,
-av, uiautomator2 - about 100 MB).
+    python3 /mnt/shared/ArrowBot.py
+The first start installs what it needs: adb and pip (apt), then opencv-python-headless, numpy, av
+and uiautomator2 (pip, about 100 MB), and unpacks itself into ~/ArrowBot_files.
 The bot works through the phone's own "Wireless debugging" (Developer options, Android 11+; needs
 Wi-Fi, not internet). The first time it shows how to turn that on and asks for the address and
 pairing code it shows; after that it connects by itself and opens the game. To stop it, tap the
@@ -37,7 +36,9 @@ import base64, io, os, runpy, shutil, subprocess, sys, zipfile
 
 BUILD = "83eadb560a052dd9"
 HERE = os.path.dirname(os.path.abspath(__file__))
-DATA = os.path.join(HERE, "ArrowBot_files")
+# Started straight from the phone's Download folder (Android's Terminal app sees it as /mnt/shared):
+# unpack into the home folder instead (that folder is Android storage: slow, picky about permissions)
+DATA = os.path.join(os.path.expanduser("~") if HERE.startswith("/mnt/shared") else HERE, "ArrowBot_files")
 WINDOWS_ONLY = (".exe", ".dll")   # scrcpy's PC window and adb for Windows: not unpacked on the phone
 
 ADB_HELP = """[-] adb (Android Debug Bridge) wasn't found or doesn't work. The bot needs it to talk to the phone.
@@ -46,7 +47,8 @@ ADB_HELP = """[-] adb (Android Debug Bridge) wasn't found or doesn't work. The b
        (what adb is and how it works: https://developer.android.com/tools/adb)
     2. On the phone, turn on Developer options and USB debugging:
          https://developer.android.com/studio/debug/dev-options
-    3. Plug the phone in by USB, allow the computer when the phone asks, and run this again."""
+    3. Plug the phone in by USB, allow the computer when the phone asks, and run this again.
+    (Running this on the phone itself, in Android's Terminal app? Start it with:  python3 ArrowBot.py --on-phone)"""
 
 PHONE_HELP = {
     "none": """[!] No phone found. adb works, so the usual reason is that USB debugging is off on the phone:
@@ -208,6 +210,30 @@ def _need(mods, phone=None):
                                                          "pip install " + " ".join(DEBIAN_PIP) + " av"))
 
 
+def _debian_setup():
+    """Android's Terminal app: put adb and pip on with apt if they're missing (a few MB with
+    --no-install-recommends). First finishes an install that was interrupted (dpkg --configure -a),
+    and waits for one that's still running instead of failing on its lock."""
+    need = [pkg for pkg, ok in (("adb", shutil.which("adb")), ("python3-pip", _importable("pip"))) if not ok]
+    if not need:
+        return
+    print(f"[*] Installing {' and '.join(need)} (sudo apt-get install --no-install-recommends ...),"
+          " this takes a minute or two ...")
+    apt = ["sudo", "env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "-o", "DPkg::Lock::Timeout=600"]
+    for cmd in (["sudo", "dpkg", "--configure", "-a"],
+                apt + ["update"],
+                apt + ["install", "-y", "--no-install-recommends", *need]):
+        subprocess.run(cmd)
+    import importlib
+    importlib.invalidate_caches()
+    if shutil.which("adb") is None or not _importable("pip"):
+        print("[-] That didn't work (no Wi-Fi? an install still running?). Try it by hand:\n"
+              "      sudo dpkg --configure -a\n"
+              "      sudo apt-get update && sudo apt-get install -y --no-install-recommends adb python3-pip\n"
+              "    then run this again.")
+        sys.exit(1)
+
+
 def _check_adb(help_text=ADB_HELP):
     """adb must run (else: where to get it)."""
     exe = shutil.which("adb")
@@ -311,6 +337,8 @@ def main():
     import onphone
     if onphone.ON_PHONE:
         # no computer: adb here connects to the phone's own wireless debugging (onphone.py)
+        if not onphone.IN_TERMUX:
+            _debian_setup()
         _need(["numpy", "cv2", "uiautomator2"], "termux" if onphone.IN_TERMUX else "debian")
         adb = _check_adb(onphone.ADB_HELP)
         old = onphone.adb_too_old(adb)

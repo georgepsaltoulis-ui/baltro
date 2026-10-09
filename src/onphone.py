@@ -26,7 +26,7 @@ IN_TERMUX = hasattr(sys, "getandroidapilevel") or "ANDROID_ROOT" in os.environ
 # Android's Terminal app: Debian in a VM (user "droid"), the phone's Download folder at /mnt/shared
 IN_TERMINAL_APP = (not IN_TERMUX and sys.platform.startswith("linux")
                    and platform.machine() in ("aarch64", "arm64")
-                   and os.path.isdir("/mnt/shared") and os.path.isdir("/home/droid"))
+                   and (os.path.isdir("/mnt/shared") or os.path.isdir("/home/droid")))
 _forced = os.environ.get("ARROWBOT_ON_PHONE")   # "1" / "0": ArrowBot.py --on-phone, or by hand
 ON_PHONE = (IN_TERMUX or IN_TERMINAL_APP) if _forced not in ("0", "1") else _forced == "1"
 VM = ON_PHONE and not IN_TERMUX   # the phone is another machine on the network, not 127.0.0.1
