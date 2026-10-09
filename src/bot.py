@@ -28,8 +28,12 @@ import sys
 import cv2
 import numpy as np
 import onphone
+import bridge
 
 ON_PHONE = onphone.ON_PHONE   # running on the phone itself (Termux) instead of a computer
+# No adb at all: everything through the ArrowBot Helper app (bridge.py) - no Wi-Fi, no computer
+BRIDGE_MODE = os.environ.get("ARROWBOT_BRIDGE") == "1"
+helper = None                 # bridge.Helper in BRIDGE_MODE
 HERE = os.path.dirname(os.path.abspath(__file__))   # templates live next to this file
 TEMP = os.path.join(HERE, "Temp")   # everything the bot writes (log, debug picture, unknown screens)
 os.makedirs(TEMP, exist_ok=True)
@@ -494,6 +498,9 @@ def start_adb_shell():
 
 def adb_input(cmd):
     """Send an `input ...` command through the persistent shell, restarting it if it died."""
+    if BRIDGE_MODE:
+        helper_input(cmd)
+        return
     for _ in range(2):
         try:
             if adb_shell is None or adb_shell.poll() is not None:
@@ -504,6 +511,21 @@ def adb_input(cmd):
             return
         except (OSError, ValueError):
             start_adb_shell()
+
+def helper_input(cmd):
+    """BRIDGE_MODE: `input keyevent KEYCODE_BACK` / `input tap X Y` / `input swipe X0 Y0 X1 Y1 MS`."""
+    a = cmd.split()
+    try:
+        if a[1:3] == ["keyevent", "KEYCODE_BACK"]:
+            helper.back()
+        elif a[1] == "tap":
+            helper.tap(float(a[2]), float(a[3]))
+        elif a[1] == "swipe":
+            helper.drag(*(float(v) for v in a[2:6]), float(a[6]) if len(a) > 6 else 300, 100)
+        else:
+            print(f"[-] The helper app can't do: {cmd}")
+    except Exception as e:
+        print(f"[-] {cmd} through the helper app failed: {e}")
 
 def adb_run(args, timeout=10):
     try:
@@ -531,6 +553,9 @@ def _setting_value(namespace, name):
 
 def keep_phone_awake():
     """Keep the screen on for as long as the bot runs (original values saved once)."""
+    if BRIDGE_MODE:
+        helper.keep_awake()        # an overlay of the helper app, gone when the bot's connection is
+        return
     for namespace, name, value, _, path in AWAKE_SETTINGS:
         if not os.path.exists(path):
             orig = _setting_value(namespace, name)
@@ -543,6 +568,8 @@ def keep_phone_awake():
 
 def restore_phone_sleep():
     """Put the phone's stay-awake and screen timeout settings back to what they were before."""
+    if BRIDGE_MODE:
+        return                     # (no settings were changed)
     if ON_PHONE and any(os.path.exists(s[-1]) for s in AWAKE_SETTINGS):
         serial, _ = onphone.try_connect("adb")   # wireless debugging may have a new port by now
         if serial:
@@ -588,6 +615,17 @@ def phone_locked():
 def wake_and_open_game():
     """At start: screen on, lock screen out of the way, the game open. A PIN / pattern / fingerprint
     lock can't (and shouldn't) be opened by the bot: it waits for you to unlock."""
+    if BRIDGE_MODE:                # (the phone is in use: it's where the bot was just started)
+        if game_in_foreground():
+            print("[+] The game is already open.")
+            return
+        print(f"[*] Opening {GAME_PACKAGE}...")
+        launch_game()
+        end = time.time() + 20
+        while time.time() < end and not game_in_foreground():
+            time.sleep(1)
+        time.sleep(3)
+        return
     if "mWakefulness=Awake" not in adb_run(["shell", "dumpsys", "power"]):
         print("[*] Waking the phone...")
         adb_run(["shell", "input", "keyevent", "KEYCODE_WAKEUP"])
@@ -613,7 +651,26 @@ def wake_and_open_game():
         time.sleep(1)
     time.sleep(3)                                              # let it finish loading
 
+def connect_helper():
+    """BRIDGE_MODE: no adb, no uiautomator2, no scrcpy: everything through the ArrowBot Helper app."""
+    global helper
+    told = False
+    while not bridge.available():
+        if not told:
+            print(bridge.SETUP_HELP)
+            told = True
+        time.sleep(2)
+    print("[*] Connecting to the ArrowBot Helper app...")
+    helper = bridge.Helper()
+    helper.connect()                 # the first time, the phone asks "Allow?"
+    keep_phone_awake()
+    start_scrcpy()                   # (asks to allow screen capture: before the game covers this)
+    wake_and_open_game()
+
 def connect():
+    if BRIDGE_MODE:
+        connect_helper()
+        return
     wait_for_phone()
     print("[*] Connecting to device via uiautomator2 (for zooming/screenshots)...")
     if not connect_u2():
@@ -635,6 +692,15 @@ def start_scrcpy():
     """Live screen + taps through scrcpy. Its picture is checked against a real screenshot first
     (video compression must not change what the bot sees); anything wrong -> old path."""
     global link, link_video
+    if BRIDGE_MODE:
+        try:
+            link = bridge.HelperLink(helper, log=print).start()
+            link_video = True
+            print(f"[+] Helper app up: screen {link.size[0]}x{link.size[1]}, taps and frames through it")
+        except Exception as e:
+            print(f"[-] The helper app can't capture the screen ({e}); trying again in a moment.")
+            link, link_video = None, False
+        return
     try:
         print("[*] Starting scrcpy live video + touch...")
         link = ScrcpyLink(max_fps=SCRCPY_FPS, bit_rate=SCRCPY_BITRATE, log=print).start()
@@ -704,6 +770,8 @@ def ask_show_screen():
 
 def restore_screen():
     """Screen back on (runs on any exit: Ctrl+C, crash, window closed)."""
+    if BRIDGE_MODE:
+        return                     # (never turned off)
     try:
         if link is not None and link.alive:
             link.display_power(True)
@@ -720,6 +788,11 @@ def fit_to_screen(img, shape):
     return img
 
 def capture_frame():
+    if BRIDGE_MODE:
+        if link is None or not link.alive:
+            start_scrcpy()         # capture stopped (screen locked, stopped from the status bar, ...)
+        f = link.next_frame(timeout=2.0)[0] if link is not None else None
+        return fit_to_screen(f, (SCREEN_H, SCREEN_W)) if f is not None else None
     frame = device_call(lambda: d.screenshot(format="opencv"), SCREENSHOT_TIMEOUT, "Screenshot")
     if frame is None:
         # Slower fallback that doesn't depend on uiautomator2
@@ -830,7 +903,7 @@ def check_video(reason):
     stared at an old picture for a minute. Restarting the video flashes the screen, so this runs
     rarely and only in those moments, never on a timer."""
     global link, link_video
-    if link is None or not link.alive or not link_video:
+    if BRIDGE_MODE or link is None or not link.alive or not link_video:
         return
     if time.time() - _video_check["t"] < VIDEO_CHECK_EVERY:
         return
@@ -853,6 +926,11 @@ def check_video(reason):
         print(f"[-] video check failed: {e}")
 
 def game_in_foreground():
+    if BRIDGE_MODE:
+        try:
+            return GAME_PACKAGE in helper.foreground()
+        except Exception:
+            return True            # couldn't tell; don't relaunch on a guess
     out = adb_run(["shell", "dumpsys", "window"])
     focus_lines = [l for l in out.splitlines() if "mCurrentFocus" in l or "mFocusedApp" in l]
     if not focus_lines:
@@ -860,6 +938,12 @@ def game_in_foreground():
     return any(GAME_PACKAGE in l for l in focus_lines)
 
 def launch_game():
+    if BRIDGE_MODE:
+        try:
+            helper.launch(GAME_PACKAGE)
+        except Exception as e:
+            print(f"[-] Couldn't open {GAME_PACKAGE}: {e}")
+        return
     adb_run(["shell", "monkey", "-p", GAME_PACKAGE, "-c", "android.intent.category.LAUNCHER", "1"])
 
 TERMINAL_CHECK_EVERY = 2.0   # on the phone, outside levels: seconds between "is Termux open?" checks
@@ -868,7 +952,13 @@ def terminal_in_front():
     """On the phone: the terminal the bot runs in (the Terminal app or Termux) is the open app, so
     you're looking at the bot or about to stop it. Taps, BACK and relaunching the game would land
     in it: the bot pauses."""
-    out = adb_run(["shell", "dumpsys window | grep -E 'mCurrentFocus|mFocusedApp'"], timeout=5)
+    if BRIDGE_MODE:
+        try:
+            out = helper.foreground()
+        except Exception:
+            return False
+    else:
+        out = adb_run(["shell", "dumpsys window | grep -E 'mCurrentFocus|mFocusedApp'"], timeout=5)
     return any(app in out for app in onphone.TERMINAL_APPS) and GAME_PACKAGE not in out
 
 class Tapper:
@@ -887,7 +977,7 @@ class Tapper:
         self.sync = sync
         # Fast path: inject finger down/up through the uiautomator2 connection (~40ms per call),
         # no `input` process start-up (~150ms). Backup: `input tap` if that ever fails.
-        self.use_u2 = not sync
+        self.use_u2 = not sync and not BRIDGE_MODE
         self.cost = 0.08         # measured seconds a u2 tap takes (running average)
         if not sync:
             threading.Thread(target=self._loop, daemon=True).start()
@@ -1101,7 +1191,7 @@ def zoom_out():
     # uiautomator2 pinch first: the scrcpy pinch often stopped short of the zoom limit
     if grabber: grabber.pause()
     try:
-        ok = device_call(lambda: d().gesture((cx - spread_x, cy - spread_y), (cx + spread_x, cy + spread_y),
+        ok = None if BRIDGE_MODE else device_call(lambda: d().gesture((cx - spread_x, cy - spread_y), (cx + spread_x, cy + spread_y),
                                              (cx - 40, cy - 40), (cx + 40, cy + 40), steps=30) or True,
                          GESTURE_TIMEOUT, "Zoom gesture")   # True = done (gesture() returns None)
     except Exception as e:
@@ -1255,6 +1345,13 @@ class StatusBarWatcher:
     def _loop(self):
         global status_bar_visible
         while True:
+            if BRIDGE_MODE:
+                try:
+                    status_bar_visible = helper.status_bar()
+                except Exception:
+                    pass
+                time.sleep(STATUS_BAR_CHECK_EVERY)
+                continue
             out = adb_run(["shell", "dumpsys window | grep -m1 'type=statusBars frame'"], timeout=5)
             if "visible=" in out:
                 status_bar_visible = "visible=true" in out
@@ -3262,6 +3359,15 @@ def choose_pan(results, world, mask_shape, skip=lambda wx, wy, d: False):
 # -----------------------------------------------------------------------------
 def restart_game():
     print(f"[!] No progress for {STUCK_TIMEOUT}s. Restarting {GAME_PACKAGE}...")
+    if BRIDGE_MODE:                # (an app can't close another one: home screen, then open it again)
+        try:
+            helper.home()
+        except Exception:
+            pass
+        time.sleep(1.0)
+        launch_game()
+        time.sleep(RESTART_LOAD_WAIT)
+        return
     adb_run(["shell", "am", "force-stop", GAME_PACKAGE])
     time.sleep(1.0)
     launch_game()
@@ -4357,6 +4463,12 @@ def _restore_tty():
 # -----------------------------------------------------------------------------
 def show_stopped():
     """The stop button turns into "Arrow bot stopped" (Android's shell can't remove a notification)."""
+    if BRIDGE_MODE:
+        try:
+            (helper or bridge.Helper()).state("stopped")
+        except Exception:
+            pass
+        return
     _post_notification("Arrow bot stopped", "Swipe this away.")
 
 def stop_bot(why):
@@ -4437,7 +4549,7 @@ class StopButton:
     away) stops the bot; on the phone the tap also opens the terminal the bot runs in."""
 
     def __init__(self):
-        self.intent = self._tap_opens()
+        self.intent = None if BRIDGE_MODE else self._tap_opens()
         self.since = None
 
     @staticmethod
@@ -4480,6 +4592,20 @@ class StopButton:
         return result
 
     def start(self):
+        if BRIDGE_MODE:            # the helper's own notification has a "Stop bot" button
+            helper.state("playing")
+
+            def poll():
+                while True:
+                    time.sleep(STOP_CHECK_EVERY)
+                    try:
+                        if helper.stop_requested():
+                            stop_bot("Stop button tapped")
+                    except Exception:
+                        pass
+
+            threading.Thread(target=poll, daemon=True).start()
+            return
         self.show()
 
         def watch():
@@ -4560,7 +4686,8 @@ if __name__ == "__main__":
     if os.name != "nt":
         _start_stop_keys()
     StopButton().start()
-    print("[*] To stop the bot: tap the \"Arrow bot is playing\" notification on the phone"
+    print("[*] To stop the bot: " + ("\"Stop bot\" in the Arrow bot notification" if BRIDGE_MODE else
+          "tap the \"Arrow bot is playing\" notification on the phone")
           + (", or Esc / q in this window." if _keys_ok() else "."))
     if show_screen:
         start_desktop_view()
@@ -4571,7 +4698,8 @@ if __name__ == "__main__":
             if tapper is not None:
                 tapper.stop()
             print("\n[*] Bot terminated safely by user.")
-            adb_shell.terminate()
+            if adb_shell is not None:
+                adb_shell.terminate()
             if link is not None:
                 if SCREEN_OFF:
                     restore_screen()

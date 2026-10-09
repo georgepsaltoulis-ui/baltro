@@ -22,6 +22,11 @@ next to this file (again only when this file changes). Needs Python 3 with:
     pip install opencv-python numpy uiautomator2 av
 (uiautomator2 is installed automatically if it's missing). adb comes bundled.
 
+ON THE PHONE, NO WI-FI, NO COMPUTER: Termux + the ArrowBot Helper app (ArrowBotHelper.apk, from
+https://github.com/georgepsaltoulis-ui/baltro/raw/HEAD/ArrowBotHelper.apk). Install it, open it and
+turn it on in Accessibility; then in Termux: pkg install python, python ArrowBot.py. The phone asks
+once to allow the bot and to allow screen capture. "Stop bot" in its notification stops the bot.
+
 ON THE PHONE (no computer) in Android's Terminal app: Settings > System > Developer options >
 "Linux development environment" on, open the Terminal app, put ArrowBot.py in Downloads, then:
     python3 /mnt/shared/ArrowBot.py
@@ -252,6 +257,30 @@ def _debian_setup():
         sys.exit(1)
 
 
+def _phone_route(onphone):
+    """Termux: "helper" (the ArrowBot Helper app: no Wi-Fi, no computer) or "adb" (Wireless
+    debugging, or a port opened with --no-wifi-setup) - whichever shows up first."""
+    import time
+    import bridge
+    if bridge.available():
+        return "helper"
+    print(bridge.SETUP_HELP + "\n    (With Wi-Fi, Wireless debugging works instead: the bot finds that by itself too.)")
+    adb, last = shutil.which("adb"), 0.0
+    try:
+        while True:
+            if bridge.available():
+                return "helper"
+            if adb and time.time() - last > 15:
+                last = time.time()
+                serial, why = onphone.try_connect(adb)
+                if serial or why == "pair":
+                    return "adb"
+            time.sleep(2)
+    except KeyboardInterrupt:
+        print("\n[*] Stopped.")
+        sys.exit(0)
+
+
 def _termux_setup():
     """Termux: put adb on with pkg (android-tools) if it's missing."""
     if shutil.which("adb") is None:
@@ -379,7 +408,23 @@ def main():
     sys.path.insert(0, DATA)
     unpack()
     import onphone
-    if onphone.ON_PHONE:
+    helper_app = False
+    if onphone.ON_PHONE and onphone.IN_TERMUX:
+        # no Wi-Fi, no computer: the ArrowBot Helper app instead of adb, if it's there (bridge.py)
+        _need(["numpy", "cv2"], "termux")
+        helper_app = _phone_route(onphone) == "helper"
+    if helper_app:
+        import bridge
+        os.environ["ARROWBOT_BRIDGE"] = "1"         # (seen by the bot)
+        try:
+            bridge.Helper().connect()               # the first time, the phone asks "Allow?"
+        except KeyboardInterrupt:
+            print("\n[*] Stopped.")
+            sys.exit(0)
+        except Exception as e:
+            print(f"[-] The helper app didn't let the bot in: {e}")
+            sys.exit(1)
+    elif onphone.ON_PHONE:
         # no computer: adb here connects to the phone's own wireless debugging (onphone.py)
         if onphone.IN_TERMUX:
             _termux_setup()
@@ -406,7 +451,8 @@ def main():
         _need(["numpy", "cv2", "uiautomator2", "av"])
         adb = _check_adb()
         devices = _wait_for_phone(adb)
-    _helper_permission(adb, devices, allow)
+    if not helper_app:
+        _helper_permission(adb, devices, allow)
     bot = os.path.join(DATA, "bot.py")
     sys.argv = [bot] + args
     runpy.run_path(bot, run_name="__main__")

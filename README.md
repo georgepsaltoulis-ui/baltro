@@ -15,7 +15,43 @@ timeout is put back.
   in the key row above the keyboard (or press `q`) to stop it. Go back to the game to let it carry on.
 - **Ctrl+C** works too.
 
-## On the phone (no computer)
+## On the phone: no Wi-Fi, no computer (recommended)
+
+This runs in **Termux** together with the small **ArrowBot Helper** app. The app does the tapping
+and sees the screen through Android's accessibility and screen-capture features, so the bot needs
+no `adb`, no Wi-Fi, no hotspot and no computer. Mobile data is only used for downloading.
+
+1. **Install the helper app.** In the phone's browser, open
+   https://github.com/georgepsaltoulis-ui/baltro/raw/HEAD/ArrowBotHelper.apk and install it. Allow
+   your browser to install apps if Android asks, and tap *Install anyway* if Play Protect warns:
+   it's a sideloaded app that uses accessibility.
+2. **Turn it on.** Open *ArrowBot Helper* and tap *1. Open Accessibility settings*, then turn on
+   *ArrowBot Helper*. If Android says the setting is restricted, go to Settings > Apps >
+   ArrowBot Helper, open the menu at the top right, tap *Allow restricted settings*, and try again.
+3. **Start the bot in Termux:**
+
+   ```sh
+   pkg install -y python
+   python -c "import urllib.request as u; u.urlretrieve('https://raw.githubusercontent.com/georgepsaltoulis-ui/baltro/HEAD/ArrowBot.py', 'ArrowBot.py')"
+   python ArrowBot.py
+   ```
+
+   The first start installs what it needs: OpenCV (from Termux's `x11-repo`) and NumPy.
+4. **Answer the phone's questions.**
+   - The first time, tap *Allow* in the "Allow the Arrow bot to control this phone?"
+     notification.
+   - Each time the bot starts, tap *Start now* to allow screen capture. Pick *Entire screen* if it
+     asks.
+
+The bot then opens the game and plays. The screen stays on while it plays.
+
+To stop it, tap **Stop bot** in the *Arrow bot* notification. You can also switch to Termux (the
+bot pauses) and press ESC, `q` or Ctrl+C.
+
+The helper app only listens to programs on the phone itself (127.0.0.1), and only after you
+tapped *Allow*. Its source is in `helper/`. Rebuild it with `helper/build_apk.sh`.
+
+## On the phone with Wi-Fi: Android's Terminal app
 
 You need Android 11 or newer and Android's built-in **Terminal** app:
 
