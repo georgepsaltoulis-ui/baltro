@@ -61,7 +61,8 @@ Tips:
 - **`/mnt/shared` is empty:** give the Terminal app access to your files in Android's settings.
 
 Termux works as well, and there it never needs an address (it uses `127.0.0.1`). Install Termux,
-then run `pkg install python` and `python ArrowBot.py`. The bot installs the rest itself. Without
+then run `pkg install python` and `python ArrowBot.py`. The bot installs the rest itself, including
+turning on Termux's `x11-repo`, which is where `opencv-python` lives. Without
 PyAV it looks at the screen through screenshots, which is slower than live video.
 
 ## On a computer (Windows)

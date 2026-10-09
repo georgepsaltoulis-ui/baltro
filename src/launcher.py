@@ -159,7 +159,7 @@ def _importable(m):
 PIP_NAMES = {"cv2": "opencv-python", "av": "av", "uiautomator2": "uiautomator2", "numpy": "numpy"}
 PHONE_PKGS = {   # Termux: prebuilt packages (pip would have to compile them)
     "termux": {"numpy": "pkg install python-numpy",
-               "cv2": "pkg install opencv-python",
+               "cv2": "pkg install x11-repo && apt update && pkg install opencv-python",
                "uiautomator2": "pkg install python-lxml python-pillow && pip install uiautomator2",
                "av": "pkg install ffmpeg build-essential && pip install av"},
 }
@@ -179,6 +179,11 @@ def _need(mods, phone=None):
         # Termux has these prebuilt (pip would have to compile them); uiautomator2 itself comes from pip
         want = [p for m in mods if not _importable(m) for p in TERMUX_PKG.get(m, [])]
         if want:
+            if "opencv-python" in want:
+                # Termux keeps OpenCV in its "x11-repo" package list, which isn't on by default
+                print("[*] Turning on Termux's x11-repo (where OpenCV is) ...")
+                subprocess.run(["pkg", "install", "-y", "x11-repo"])
+                subprocess.run(["apt", "update"])
             print(f"[*] Installing {' '.join(want)} (pkg install) ...")
             subprocess.run(["pkg", "install", "-y", *want])
             import importlib
