@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Arrows bot - plays the Android game "Arrows" (com.arrow.out) on a phone connected by USB.
+Arrows bot - plays the Android game "Arrows" (com.arrow.out) on a phone connected by USB, or on
+the phone itself with no computer at all (see ON THE PHONE below).
 
     python ArrowBot.py             start (asks whether to show the phone screen on this PC)
     python ArrowBot.py --show      start and show the phone screen in a window (view only)
@@ -10,18 +11,32 @@ Arrows bot - plays the Android game "Arrows" (com.arrow.out) on a phone connecte
 The first time, it asks before putting uiautomator2's small helper on the phone (needed to control
 it). If adb isn't set up, it shows where to get it; if the phone isn't found (USB debugging off,
 computer not allowed yet, ...), it says what to do and waits until the phone is there.
-Esc (or Ctrl+C) stops it. The phone's screen is turned back on and its normal screen timeout restored.
+The phone's screen stays on while the bot plays. Esc (or Ctrl+C) stops it; the phone's normal screen
+timeout is then restored.
 
 Everything the bot needs is inside this file: on the first run it's unpacked into ArrowBot_files/
 next to this file (again only when this file changes). Needs Python 3 with:
     pip install opencv-python numpy uiautomator2 av
 (uiautomator2 is installed automatically if it's missing). adb comes bundled.
+
+ON THE PHONE (no computer, Android 11 or newer): install Termux, then in Termux:
+    pkg install python android-tools python-numpy opencv-python python-pillow python-lxml
+    pip install uiautomator2
+    termux-setup-storage                      (once: lets Termux see your Downloads)
+    cp ~/storage/downloads/ArrowBot.py ~ && python ArrowBot.py
+Optional, for live video instead of slower screenshots:
+    pkg install ffmpeg build-essential && pip install av
+The bot works through the phone's own "Wireless debugging" (Developer options; needs Wi-Fi, not
+internet). The first time it shows how to turn that on and asks for the pairing code; after that it
+connects by itself and opens the game. Open Termux to pause the bot; Ctrl+C there stops it.
 """
 import base64, io, os, runpy, shutil, subprocess, sys, zipfile
 
 BUILD = "83eadb560a052dd9"
 HERE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.path.join(HERE, "ArrowBot_files")
+ON_PHONE = hasattr(sys, "getandroidapilevel") or "ANDROID_ROOT" in os.environ   # in Termux, no computer
+WINDOWS_ONLY = (".exe", ".dll")   # scrcpy's PC window and adb for Windows: not unpacked on the phone
 
 ADB_HELP = """[-] adb (Android Debug Bridge) wasn't found or doesn't work. The bot needs it to talk to the phone.
     1. Download Google's platform-tools, unzip them, add that folder to your PATH:
@@ -83,7 +98,7 @@ def unpack():
     print("[*] First start: unpacking the bot's files ...")
     os.makedirs(DATA, exist_ok=True)
     with zipfile.ZipFile(io.BytesIO(_payload())) as z:
-        z.extractall(DATA)
+        z.extractall(DATA, [n for n in z.namelist() if not (ON_PHONE and n.lower().endswith(WINDOWS_ONLY))])
     with open(stamp, "w") as f:
         f.write(BUILD)
 
@@ -134,6 +149,13 @@ def _importable(m):
         return False
 
 
+PHONE_PKGS = {   # Termux has these prebuilt (pip would have to compile them)
+    "numpy": "pkg install python-numpy",
+    "cv2": "pkg install opencv-python",
+    "uiautomator2": "pkg install python-lxml python-pillow && pip install uiautomator2",
+}
+
+
 def _need(mods):
     if "uiautomator2" in mods and not _importable("uiautomator2"):
         # (its helper app on the phone is installed by uiautomator2 itself on the first connect)
@@ -143,13 +165,21 @@ def _need(mods):
         importlib.invalidate_caches()
     missing = [m for m in mods if not _importable(m)]
     if missing:
-        pip = {"cv2": "opencv-python", "av": "av", "uiautomator2": "uiautomator2", "numpy": "numpy"}
         print("[-] Missing Python packages: " + ", ".join(missing))
-        print("    Install them with:  pip install " + " ".join(pip[m] for m in missing))
+        if ON_PHONE:
+            print("    Install them in Termux with:")
+            for m in missing:
+                print("      " + PHONE_PKGS[m])
+        else:
+            pip = {"cv2": "opencv-python", "av": "av", "uiautomator2": "uiautomator2", "numpy": "numpy"}
+            print("    Install them with:  pip install " + " ".join(pip[m] for m in missing))
         sys.exit(1)
+    if ON_PHONE and not _importable("av"):
+        print("[*] PyAV (av) isn't installed, so the bot looks at the screen through screenshots (slower\n"
+              "    than live video). For live video: pkg install ffmpeg build-essential && pip install av")
 
 
-def _check_adb():
+def _check_adb(help_text=ADB_HELP):
     """adb must run (else: where to get it)."""
     exe = shutil.which("adb")
     try:
@@ -158,7 +188,7 @@ def _check_adb():
     except Exception:
         ok = False
     if not ok:
-        print(ADB_HELP)
+        print(help_text)
         sys.exit(1)
     return exe
 
@@ -246,16 +276,27 @@ def main():
     allow = "--allow-helper" in args
     args = [a for a in args if a != "--allow-helper"]
     unpack()
-    scrcpy_dir = os.path.join(DATA, "Scrcpy")
-    if shutil.which("adb") is None and os.path.isdir(scrcpy_dir):
-        os.environ["PATH"] = scrcpy_dir + os.pathsep + os.environ.get("PATH", "")
-    _need(["numpy", "cv2", "uiautomator2", "av"])
-    adb = _check_adb()
-    devices = _wait_for_phone(adb)
+    sys.path.insert(0, DATA)
+    if ON_PHONE:
+        # no computer: Termux's adb connects to the phone's own wireless debugging (onphone.py)
+        import onphone
+        _need(["numpy", "cv2", "uiautomator2"])     # (av optional: screenshots without it)
+        adb = _check_adb(onphone.ADB_HELP)
+        try:
+            devices = [onphone.wait_until_connected(adb)]
+        except KeyboardInterrupt:
+            print("\n[*] Stopped.")
+            sys.exit(0)
+    else:
+        scrcpy_dir = os.path.join(DATA, "Scrcpy")
+        if shutil.which("adb") is None and os.path.isdir(scrcpy_dir):
+            os.environ["PATH"] = scrcpy_dir + os.pathsep + os.environ.get("PATH", "")
+        _need(["numpy", "cv2", "uiautomator2", "av"])
+        adb = _check_adb()
+        devices = _wait_for_phone(adb)
     _helper_permission(adb, devices, allow)
     bot = os.path.join(DATA, "bot.py")
     sys.argv = [bot] + args
-    sys.path.insert(0, DATA)
     runpy.run_path(bot, run_name="__main__")
 
 

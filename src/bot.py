@@ -1,5 +1,6 @@
 """
-Arrows bot - plays the Android game "Arrows" (com.arrow.out) on a USB-connected phone.
+Arrows bot - plays the Android game "Arrows" (com.arrow.out) on a USB-connected phone, or on the
+phone itself in Termux (no computer: it uses the phone's own Wireless debugging, see onphone.py).
 
     python bot.py                 play (asks whether to show the phone screen on this PC)
     python bot.py --show          play and show the phone screen in a window (view only)
@@ -25,7 +26,9 @@ import time
 import sys
 import cv2
 import numpy as np
+import onphone
 
+ON_PHONE = onphone.ON_PHONE   # running on the phone itself (Termux) instead of a computer
 HERE = os.path.dirname(os.path.abspath(__file__))   # templates live next to this file
 TEMP = os.path.join(HERE, "Temp")   # everything the bot writes (log, debug picture, unknown screens)
 os.makedirs(TEMP, exist_ok=True)
@@ -119,11 +122,15 @@ SCREENSHOT_TIMEOUT = 5   # seconds before a hung screenshot is abandoned
 CAPTURE_THREADS = 2      # screenshots taken in parallel (more fresh frames per second)
 USE_SCRCPY = True        # live video + taps through scrcpy (./Scrcpy); falls back to screenshots
 SCRCPY_MAX_DIFF = 10     # scrcpy frame must look like a real screenshot (median abs diff) to be used
-SCRCPY_FPS = 60          # live video frame rate (60 = a frame every ~17ms: changes seen sooner;
-                         # 30 saves some battery/USB load)
+SCRCPY_FPS = 30 if ON_PHONE else 60  # live video frame rate (60 = a frame every ~17ms: changes
+                         # seen sooner; 30 saves some battery/USB load - and on the phone itself the
+                         # decoding shares the CPU with the game)
 SCRCPY_BITRATE = 8_000_000  # video quality; lower = less battery/USB load
-SCREEN_OFF = True        # turn the phone's screen off while the bot plays (saves the most battery;
-                         # the game keeps running). It's turned back on whenever the bot exits.
+SCREEN_OFF = False       # True: turn the phone's screen off while the bot plays (saves battery; the
+                         # game keeps running). False: the screen stays on the whole time (its
+                         # timeout is held off by keep_phone_awake()), so you can watch the game.
+SCRCPY_VERSION = "5.0"   # version of ./Scrcpy/scrcpy-server (asked from scrcpy.exe on Windows; the
+                         # server only starts with its own version, so update this with the server)
 
 # -----------------------------------------------------------------------------
 # SCRCPY LINK: live video + instant touches through scrcpy's server (./Scrcpy/scrcpy-server)
@@ -151,6 +158,8 @@ def _adb(*args, timeout=15):
 def scrcpy_version():
     """The server must be started with the exact version of the scrcpy it came with."""
     exe = os.path.join(SCRCPY_DIR, "scrcpy.exe")
+    if os.name != "nt" or not os.path.exists(exe):
+        return SCRCPY_VERSION   # scrcpy.exe only runs on Windows (on the phone only the server is used)
     out = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=10).stdout
     first = out.strip().splitlines()[0] if out.strip() else ""
     parts = first.split()
@@ -196,8 +205,9 @@ class ScrcpyLink:
                 f"scid={scid:08x} log_level=warn tunnel_forward=true audio=false control=true "
                 f"raw_stream=true video_codec=h264 max_fps={self.max_fps} "
                 f"video_bit_rate={self.bit_rate} cleanup=true")
-        # no stay_awake here: keep_phone_awake() owns that setting (scrcpy's own restore could run
-        # after the bot's and leave the phone set to never sleep)
+        # no stay_awake / screen_off_timeout here: keep_phone_awake() owns those settings (scrcpy's
+        # own restore could run after the bot's, or a video restart could save the bot's value as
+        # "original", and leave the phone set to never sleep)
         self.server = subprocess.Popen(["adb", "shell", args], stdout=subprocess.PIPE,
                                        stderr=subprocess.STDOUT, text=True)
         threading.Thread(target=self._server_log, daemon=True).start()
@@ -443,7 +453,10 @@ def run_with_timeout(fn, timeout):
 def connect_u2():
     global d
     import uiautomator2 as u2
-    finished, value, error = run_with_timeout(u2.connect, 30)
+    # on the phone: 127.0.0.1:PORT, its own wireless debugging (connect_usb: older uiautomator2
+    # versions would take an IP given to connect() for their WiFi agent)
+    serial = os.environ.get("ANDROID_SERIAL")
+    finished, value, error = run_with_timeout(lambda: u2.connect_usb(serial) if serial else u2.connect(), 30)
     if not finished or error is not None:
         print(f"[-] Could not connect via uiautomator2: {error or 'timed out'}")
         return False
@@ -498,48 +511,64 @@ def adb_run(args, timeout=10):
         print(f"[-] adb {' '.join(args)} failed: {e}")
         return ""
 
-# The phone must not sleep / lock while the bot plays (with the panel off nothing touches it, so
-# its screen timeout would run out and pause the game). Android's "stay awake" setting is switched
-# on only while the bot runs: the value found at start is saved to a file, and put back when the bot
-# stops (the supervisor does it, so crash restarts don't). If the bot was killed before it could
-# restore, the next start finds the file and restores / reuses that original value.
-STAY_AWAKE_FILE = os.path.join(TEMP, "stay_awake_original.txt")
-STAY_AWAKE_SETTING = "stay_on_while_plugged_in"   # 0 = off (Android default), 7 = on (any power)
+# The phone must not sleep / lock while the bot plays (its screen timeout would run out and pause
+# the game). Two Android settings are changed only while the bot runs: "stay awake" (screen on while
+# charging) and the screen timeout itself (keeps the screen on on battery too: on the phone itself
+# nothing has to be plugged in). The values found at start are saved to files and put back when the
+# bot stops (the supervisor does it, so crash restarts don't). If the bot was killed before it could
+# restore, the next start finds the files and restores / reuses those original values.
+AWAKE_SETTINGS = [   # (namespace, name, value while the bot runs, Android default, file with the original)
+    ("global", "stay_on_while_plugged_in", "7", "0",            # 7 = on with any power source
+     os.path.join(TEMP, "stay_awake_original.txt")),
+    ("system", "screen_off_timeout", "2147483647", "30000",     # ms: ~24 days, i.e. never
+     os.path.join(TEMP, "screen_timeout_original.txt")),
+]
 
-def _stay_awake_value():
-    out = adb_run(["shell", "settings", "get", "global", STAY_AWAKE_SETTING], timeout=5).strip()
+def _setting_value(namespace, name):
+    out = adb_run(["shell", "settings", "get", namespace, name], timeout=5).strip()
     return out if out.isdigit() else None
 
 def keep_phone_awake():
-    """Switch "stay awake" on for as long as the bot runs (original value saved once)."""
-    if not os.path.exists(STAY_AWAKE_FILE):
-        orig = _stay_awake_value()
-        if orig is None:
-            print("[-] Couldn't read the phone's stay-awake setting; not changing it.")
-            return
-        with open(STAY_AWAKE_FILE, "w") as f:
-            f.write(orig)
-    adb_run(["shell", "settings", "put", "global", STAY_AWAKE_SETTING, "7"], timeout=5)
+    """Keep the screen on for as long as the bot runs (original values saved once)."""
+    for namespace, name, value, _, path in AWAKE_SETTINGS:
+        if not os.path.exists(path):
+            orig = _setting_value(namespace, name)
+            if orig is None:
+                print(f"[-] Couldn't read the phone's {name} setting; not changing it.")
+                continue
+            with open(path, "w") as f:
+                f.write(orig)
+        adb_run(["shell", "settings", "put", namespace, name, value], timeout=5)
 
 def restore_phone_sleep():
-    """Put the phone's stay-awake setting back to what it was before the bot started."""
-    try:
-        with open(STAY_AWAKE_FILE) as f:
-            orig = f.read().strip()
-    except OSError:
-        return
-    if not orig.isdigit():
-        orig = "0"
-    adb_run(["shell", "settings", "put", "global", STAY_AWAKE_SETTING, orig], timeout=5)
-    if _stay_awake_value() == orig:
-        os.remove(STAY_AWAKE_FILE)
-        print(f"[*] Phone screen timeout back to normal (stay-awake = {orig}).")
-    else:
-        print(f"[-] Couldn't restore the phone's stay-awake setting (wanted {orig}); "
-              f"run: adb shell settings put global {STAY_AWAKE_SETTING} {orig}")
+    """Put the phone's stay-awake and screen timeout settings back to what they were before."""
+    if ON_PHONE and any(os.path.exists(s[-1]) for s in AWAKE_SETTINGS):
+        serial, _ = onphone.try_connect("adb")   # wireless debugging may have a new port by now
+        if serial:
+            os.environ["ANDROID_SERIAL"] = serial
+    for namespace, name, _, default, path in AWAKE_SETTINGS:
+        try:
+            with open(path) as f:
+                orig = f.read().strip()
+        except OSError:
+            continue
+        if not orig.isdigit():
+            orig = default
+        adb_run(["shell", "settings", "put", namespace, name, orig], timeout=5)
+        if _setting_value(namespace, name) == orig:
+            os.remove(path)
+            print(f"[*] Phone screen timeout back to normal ({name} = {orig}).")
+        else:
+            print(f"[-] Couldn't restore the phone's {name} setting (wanted {orig}); "
+                  f"run: adb shell settings put {namespace} {name} {orig}")
 
 def wait_for_phone():
     """Don't give up if the phone isn't plugged in (or USB debugging isn't allowed yet): wait."""
+    if ON_PHONE:
+        # no cable: Termux's adb talks to this phone's wireless debugging (its port changes
+        # whenever wireless debugging is switched on again, so it's looked up every time)
+        onphone.wait_until_connected("adb")
+        return
     told = False
     while True:
         out = adb_run(["devices"])
@@ -661,6 +690,8 @@ def stop_desktop_view():
 
 def ask_show_screen():
     """Startup choice: --show / --no-show, otherwise ask (default: no)."""
+    if ON_PHONE:
+        return False   # running on the phone: its own screen shows the game
     if "--show" in sys.argv:
         return True
     if "--no-show" in sys.argv or not sys.stdin.isatty():
@@ -829,6 +860,14 @@ def game_in_foreground():
 
 def launch_game():
     adb_run(["shell", "monkey", "-p", GAME_PACKAGE, "-c", "android.intent.category.LAUNCHER", "1"])
+
+TERMINAL_CHECK_EVERY = 2.0   # on the phone, outside levels: seconds between "is Termux open?" checks
+
+def terminal_in_front():
+    """On the phone: Termux (where the bot runs) is the open app, so you're looking at the bot or
+    about to stop it. Taps, BACK and relaunching the game would land in Termux: the bot pauses."""
+    out = adb_run(["shell", "dumpsys window | grep -E 'mCurrentFocus|mFocusedApp'"], timeout=5)
+    return onphone.TERMINAL_PACKAGE in out and GAME_PACKAGE not in out
 
 class Tapper:
     """
@@ -3504,6 +3543,7 @@ def run_solver(deadline=None):
     needs_zoom = True
     was_in_game = None
     last_fg_check = 0
+    last_terminal_check = 0
     prev = None                # previous in-level frame (for the stillness check)
     plan = None                # cached escapes: {"arrows", "pose", "mask", "last_tap"}
     waves_ok = True            # turned off for the level if a planned wave ever costs a star
@@ -3551,6 +3591,18 @@ def run_solver(deadline=None):
             if in_game:
                 level_seen_at = frame_time   # the level's intro ignores pinches for a moment
             last_progress = current_time   # a screen change is progress (e.g. level -> win screen)
+
+        if ON_PHONE and not in_game and current_time - last_terminal_check > TERMINAL_CHECK_EVERY:
+            last_terminal_check = current_time
+            if terminal_in_front():
+                tapper.clear(wait=False)
+                print("[*] Termux is open: paused. Ctrl+C here stops the bot; open the game to carry on.")
+                while terminal_in_front():
+                    time.sleep(1.0)
+                print("[*] Back from Termux: carrying on.")
+                last_progress = last_fg_check = time.time()   # (a minute in Termux isn't "stuck")
+                min_frame_time = time.time()
+                continue
 
         stuck_limit = STUCK_TIMEOUT if in_game else MENU_BACK_AFTER
         if in_game and world.too_big and not world.surveyed:
@@ -4320,6 +4372,11 @@ if __name__ == "__main__":
         # the phone is kept awake only while the bot runs: put its setting back on any exit
         atexit.register(restore_phone_sleep)
         on_console_close(restore_phone_sleep)
+        if ON_PHONE:
+            # the game is the open app while the bot plays: keep Termux running at full speed
+            onphone.wake_lock(True)
+            atexit.register(onphone.wake_lock, False)
+            print("[*] Running on the phone. To stop: open Termux (the bot pauses) and press Ctrl+C.")
         first = True
         while True:
             child = subprocess.Popen([sys.executable, os.path.abspath(__file__), "--child",
