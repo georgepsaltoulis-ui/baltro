@@ -133,21 +133,27 @@ public class CaptureService extends Service {
         return new int[]{width, height};
     }
 
-    /** Copy the newest frame newer than `after` (waiting up to timeoutMs) into dest as tight RGBA
-     *  rows. Returns {seq, width, height, age_ms} or null. */
-    long[] copyFrame(long after, long timeoutMs, byte[] dest) {
+    /** Copy the newest frame newer than `after` into dest as tight RGBA rows. The screen is only
+     *  drawn again when something on it changes: no new frame within repeatMs means the latest one
+     *  still shows the screen as it is, so that one comes again with age 0 (scrcpy repeats frames
+     *  the same way). Returns {seq, width, height, age_ms} or null (no capture / no frame yet). */
+    long[] copyFrame(long after, long repeatMs, byte[] dest) {
         synchronized (lock) {
-            long end = SystemClock.uptimeMillis() + timeoutMs;
+            long end = SystemClock.uptimeMillis() + repeatMs;
+            boolean repeat = false;
             while ((latest == null || seq <= after) && instance == this) {
                 long left = end - SystemClock.uptimeMillis();
-                if (left <= 0) return null;
+                if (left <= 0) {
+                    repeat = latest != null;
+                    break;
+                }
                 try {
                     lock.wait(left);
                 } catch (InterruptedException e) {
                     return null;
                 }
             }
-            if (latest == null) return null;
+            if (latest == null || instance != this) return null;
             Image.Plane p = latest.getPlanes()[0];
             ByteBuffer buf = p.getBuffer().duplicate();
             int w = latest.getWidth(), h = latest.getHeight(), row = w * 4, stride = p.getRowStride();
@@ -161,7 +167,7 @@ public class CaptureService extends Service {
                     buf.get(dest, y * row, row);
                 }
             }
-            long age = Math.max(0, Math.min(5000, (System.nanoTime() - latest.getTimestamp()) / 1_000_000));
+            long age = repeat ? 0 : Math.max(0, Math.min(5000, (System.nanoTime() - latest.getTimestamp()) / 1_000_000));
             return new long[]{seq, w, h, age};
         }
     }

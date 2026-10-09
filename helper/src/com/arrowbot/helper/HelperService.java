@@ -29,6 +29,9 @@ import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -43,7 +46,7 @@ import java.util.concurrent.TimeUnit;
 public class HelperService extends AccessibilityService {
     static final String TAG = "ArrowBotHelper";
     static final int PORT = 47123;
-    static final String VERSION = "ArrowBotHelper 1";
+    static final String VERSION = "ArrowBotHelper 2";
 
     static volatile HelperService instance;
     /** When the user last tapped "Stop bot" (ms, wall clock): bot sessions started before that stop. */
@@ -53,7 +56,10 @@ public class HelperService extends AccessibilityService {
     private Handler main;
     private HandlerThread gestureThread;
     private Handler gestureHandler;
-    private final Object gestureLock = new Object();
+    /** All gestures run one after another here (a new gesture would cancel one in progress). Taps
+     *  are queued and answered at once, so the bot taps at its own pace (like over scrcpy); drags,
+     *  pinches and BACK wait for their turn and their end. */
+    private final ExecutorService gestures = Executors.newSingleThreadExecutor();
     private volatile String lastPackage = "";
     private View keepOnView;
     private int keepOnCount = 0;
@@ -87,6 +93,7 @@ public class HelperService extends AccessibilityService {
         } catch (IOException ignored) {
         }
         if (gestureThread != null) gestureThread.quitSafely();
+        gestures.shutdownNow();
         super.onDestroy();
     }
 
@@ -190,12 +197,33 @@ public class HelperService extends AccessibilityService {
                             int[] wh = cap.size();
                             int need = wh[0] * wh[1] * 4;
                             if (frame == null || frame.length < need) frame = new byte[need];
-                            long[] f = cap.copyFrame(Long.parseLong(a[1]), 1500, frame);
+                            long[] f = cap.copyFrame(Long.parseLong(a[1]), 100, frame);
                             if (f == null) { send(out, "NONE timeout"); break; }
                             send(out, "FRAME " + f[0] + " " + f[1] + " " + f[2] + " " + f[3]);
                             out.write(frame, 0, (int) (f[1] * f[2] * 4));
                             out.flush();
                             break;
+                        }
+                        case "STREAM": {    // STREAM <max_fps>: from now on, every new frame (like scrcpy's video)
+                            int fps = a.length > 1 ? Math.max(1, Integer.parseInt(a[1])) : 60;
+                            long gapNs = 1_000_000_000L / fps, lastNs = 0, last = 0;
+                            s.setSendBufferSize(4 << 20);
+                            while (true) {
+                                CaptureService cap = CaptureService.instance;
+                                if (cap == null) { send(out, "NONE nocapture"); return; }
+                                long wait = lastNs + gapNs - System.nanoTime();
+                                if (wait > 0) Thread.sleep(wait / 1_000_000, (int) (wait % 1_000_000));
+                                int[] wh = cap.size();
+                                int need = wh[0] * wh[1] * 4;
+                                if (frame == null || frame.length < need) frame = new byte[need];
+                                long[] f = cap.copyFrame(last, 100, frame);
+                                if (f == null) continue;
+                                lastNs = System.nanoTime();
+                                last = f[0];
+                                send(out, "FRAME " + f[0] + " " + f[1] + " " + f[2] + " " + f[3]);
+                                out.write(frame, 0, (int) (f[1] * f[2] * 4));
+                                out.flush();
+                            }
                         }
                         case "TAP":         // TAP x y hold_ms
                             send(out, tap(f(a[1]), f(a[2]), l(a[3])) ? "OK" : "ERR cancelled");
@@ -208,10 +236,10 @@ public class HelperService extends AccessibilityService {
                                     l(a[9])) ? "OK" : "ERR cancelled");
                             break;
                         case "BACK":
-                            send(out, performGlobalAction(GLOBAL_ACTION_BACK) ? "OK" : "ERR");
+                            send(out, inTurn(() -> performGlobalAction(GLOBAL_ACTION_BACK)) ? "OK" : "ERR");
                             break;
                         case "HOME":
-                            send(out, performGlobalAction(GLOBAL_ACTION_HOME) ? "OK" : "ERR");
+                            send(out, inTurn(() -> performGlobalAction(GLOBAL_ACTION_HOME)) ? "OK" : "ERR");
                             break;
                         case "LAUNCH": {    // LAUNCH <package>
                             Intent i = getPackageManager().getLaunchIntentForPackage(a[1]);
@@ -248,6 +276,8 @@ public class HelperService extends AccessibilityService {
                     }
                 } catch (RuntimeException e) {
                     send(out, "ERR " + e);
+                } catch (InterruptedException e) {
+                    return;
                 }
             }
         } catch (IOException ignored) {
@@ -282,8 +312,18 @@ public class HelperService extends AccessibilityService {
         return new float[]{Math.max(0, Math.min(wh[0] - 1, x)), Math.max(0, Math.min(wh[1] - 1, y))};
     }
 
-    /** Dispatch one gesture and wait until it's done. A new gesture cancels one in progress, so
-     *  callers hold gestureLock. */
+    /** Run on the gesture worker, after everything queued before it, and wait for the result. */
+    private boolean inTurn(java.util.concurrent.Callable<Boolean> job) {
+        try {
+            Future<Boolean> f = gestures.submit(job);
+            return f.get(30, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /** Dispatch one gesture and wait until it's done (on the gesture worker: a new gesture would
+     *  cancel one in progress). */
     private boolean dispatch(GestureDescription g, long ms) {
         final boolean[] ok = {false};
         final CountDownLatch done = new CountDownLatch(1);
@@ -308,15 +348,15 @@ public class HelperService extends AccessibilityService {
         return ok[0];
     }
 
+    /** Queued: answered at once, done in order right after what's queued before it. */
     boolean tap(float x, float y, long holdMs) {
         float[] p = clamp(x, y);
         Path path = new Path();
         path.moveTo(p[0], p[1]);
         GestureDescription g = new GestureDescription.Builder()
                 .addStroke(new GestureDescription.StrokeDescription(path, 0, holdMs)).build();
-        synchronized (gestureLock) {
-            return dispatch(g, holdMs);
-        }
+        gestures.submit(() -> dispatch(g, holdMs));
+        return true;
     }
 
     /** One finger from (x0,y0) to (x1,y1) in moveMs, then held still for holdMs before lifting:
@@ -330,10 +370,8 @@ public class HelperService extends AccessibilityService {
         Path hold = new Path();
         hold.moveTo(b[0], b[1]);
         GestureDescription.StrokeDescription s2 = s1.continueStroke(hold, 0, holdMs, false);
-        synchronized (gestureLock) {
-            if (!dispatch(new GestureDescription.Builder().addStroke(s1).build(), moveMs)) return false;
-            return dispatch(new GestureDescription.Builder().addStroke(s2).build(), holdMs);
-        }
+        return inTurn(() -> dispatch(new GestureDescription.Builder().addStroke(s1).build(), moveMs)
+                && dispatch(new GestureDescription.Builder().addStroke(s2).build(), holdMs));
     }
 
     boolean pinch(float ax0, float ay0, float bx0, float by0, float ax1, float ay1, float bx1, float by1, long ms) {
@@ -347,9 +385,7 @@ public class HelperService extends AccessibilityService {
         GestureDescription g = new GestureDescription.Builder()
                 .addStroke(new GestureDescription.StrokeDescription(pa, 0, ms))
                 .addStroke(new GestureDescription.StrokeDescription(pb, 0, ms)).build();
-        synchronized (gestureLock) {
-            return dispatch(g, ms);
-        }
+        return inTurn(() -> dispatch(g, ms));
     }
 
     // ------------------------------------------------------------------ what's on screen

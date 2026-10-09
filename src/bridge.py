@@ -86,8 +86,8 @@ class _Conn:
         line, self.buf = self.buf.split(b"\n", 1)
         return line.decode("utf-8", "replace").strip()
 
-    def exactly(self, n):
-        out = bytearray(n)
+    def exactly(self, n, into=None):
+        out = bytearray(n) if into is None else into
         view = memoryview(out)
         have = min(n, len(self.buf))
         view[:have] = self.buf[:have]
@@ -233,51 +233,105 @@ class Helper:
 
 
 class HelperLink:
-    """bot.py's ScrcpyLink calls, through the helper app: frames, tap, drag, pinch."""
+    """bot.py's ScrcpyLink calls, through the helper app: frames, tap, drag, pinch.
 
-    def __init__(self, helper, log=print):
+    Frames come the way scrcpy's video did: the app streams every new frame (up to max_fps; the
+    latest again when the screen doesn't change), a thread here keeps receiving them, and only the
+    frames the bot actually uses get converted (RGBA -> BGR) when it asks for one."""
+    POOL = 4                 # frame buffers: the newest, one or two being converted, one being filled
+
+    def __init__(self, helper, max_fps=60, log=print):
         self.h = helper
+        self.max_fps = max_fps
         self.log = log
         self.alive = False
         self.size = None
-        self.seq = 0
-        self.lock = threading.Lock()
+        self.cond = threading.Condition()
+        self.latest = None    # (buffer, width, height, seq) of the newest frame
+        self.frame_t = 0.0    # (about) when it was captured
+        self.frames = 0
+        self.in_use = {}      # id(buffer) -> conversions running on it (the reader leaves it alone)
+        self.pool = []
+        self.conn = None
 
-    def start(self):
+    def start(self, timeout=5.0):
         if not self.h.ensure_capture():
             raise HelperError("screen capture wasn't allowed")
         w, h, _ = self.h.info()
         self.size = (w, h)
+        self.conn = _Conn(timeout=10)
+        self.conn.sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 8 << 20)
+        self.conn.hello(self.h.token)
+        self.conn.sock.sendall(f"STREAM {self.max_fps}\n".encode())
         self.alive = True
+        threading.Thread(target=self._receive, daemon=True).start()
+        with self.cond:
+            self.cond.wait_for(lambda: self.latest is not None or not self.alive, timeout=timeout)
+        if self.latest is None:
+            self.stop()
+            raise HelperError("no frames from the helper app")
         return self
 
     def stop(self):
         self.alive = False
+        if self.conn is not None:
+            self.conn.close()
+        with self.cond:
+            self.cond.notify_all()
+
+    def _free_buffer(self, n):
+        with self.cond:
+            busy = {id(self.latest[0])} if self.latest else set()
+            busy |= {k for k, v in self.in_use.items() if v}
+            for b in self.pool:
+                if id(b) not in busy and len(b) >= n:
+                    return b
+            b = bytearray(n)
+            self.pool = [p for p in self.pool if id(p) in busy or len(p) >= n][:self.POOL - 1] + [b]
+            return b
+
+    def _receive(self):
+        try:
+            while self.alive:
+                head = self.conn.line().split()
+                if not head or head[0] != "FRAME":
+                    raise HelperError(" ".join(head) or "stream ended")
+                seq, w, h, age = (int(v) for v in head[1:5])
+                n = w * h * 4
+                buf = self._free_buffer(n)
+                self.conn.exactly(n, into=buf)
+                t = time.time() - age / 1000.0
+                with self.cond:
+                    self.latest = (buf, w, h, seq)
+                    self.frame_t = t
+                    self.frames += 1
+                    self.cond.notify_all()
+        except Exception as e:
+            if self.alive:
+                self.log(f"    [helper] frames stopped: {e}")
+        self.alive = False
+        with self.cond:
+            self.cond.notify_all()
 
     def next_frame(self, newer_than=0.0, timeout=1.0):
         """Newest frame captured after `newer_than` as BGR, plus (about) when it was captured."""
-        end = time.time() + timeout
-        while self.alive and time.time() < end:
-            with self.lock:
-                after = self.seq
-            try:
-                got = self.h.frame(after)
-            except (OSError, HelperError) as e:
-                self.log(f"    [helper] frames stopped: {e}")
-                self.alive = False
-                break
-            if got is None:
-                continue
-            seq, img, age = got
-            t = time.time() - age
-            with self.lock:
-                self.seq = max(self.seq, seq)
-            if t > newer_than:
-                return img, t
-        return None, 0.0
+        with self.cond:
+            ok = self.cond.wait_for(lambda: (self.latest is not None and self.frame_t > newer_than)
+                                    or not self.alive, timeout=timeout)
+            if not ok or not self.alive:
+                return None, 0.0
+            buf, w, h, _ = self.latest
+            t = self.frame_t
+            self.in_use[id(buf)] = self.in_use.get(id(buf), 0) + 1
+        try:
+            rgba = np.frombuffer(buf, np.uint8, count=w * h * 4).reshape(h, w, 4)
+            return cv2.cvtColor(rgba, cv2.COLOR_RGBA2BGR), t
+        finally:
+            with self.cond:
+                self.in_use[id(buf)] -= 1
 
     def tap(self, x, y, hold=0.03):
-        self.h.tap(x, y, hold * 1000)
+        self.h.tap(x, y, hold * 1000)      # queued by the app: returns at once, like a scrcpy tap
 
     def drag(self, x0, y0, x1, y1, steps=10, step_time=0.012, hold=0.08):
         # moved at an even speed, then held still (the helper lifts the finger with no speed left)

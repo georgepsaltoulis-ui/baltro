@@ -693,7 +693,7 @@ def start_scrcpy():
     global link, link_video
     if BRIDGE_MODE:
         try:
-            link = bridge.HelperLink(helper, log=print).start()
+            link = bridge.HelperLink(helper, max_fps=SCRCPY_FPS, log=print).start()
             link_video = True
             print(f"[+] Helper app up: screen {link.size[0]}x{link.size[1]}, taps and frames through it")
         except Exception as e:

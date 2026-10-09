@@ -48,6 +48,13 @@ The bot then opens the game and plays. The screen stays on while it plays.
 To stop it, tap **Stop bot** in the *Arrow bot* notification. You can also switch to Termux (the
 bot pauses) and press ESC, `q` or Ctrl+C.
 
+It plays the same way as on a computer:
+
+- The helper streams the screen at 60 frames a second, like scrcpy did, and the bot always takes
+  the newest frame.
+- Taps go out at the bot's usual pace, one every 50 ms. The app queues them, so they never cut
+  each other off.
+
 The helper app only listens to programs on the phone itself (127.0.0.1), and only after you
 tapped *Allow*. Its source is in `helper/`. Rebuild it with `helper/build_apk.sh`.
 

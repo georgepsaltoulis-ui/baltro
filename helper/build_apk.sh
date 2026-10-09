@@ -8,8 +8,8 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 OUT="$HERE/../ArrowBotHelper.apk"
 : "${BUILD_TOOLS:?set BUILD_TOOLS to an Android build-tools folder}"
 : "${ANDROID_JAR:?set ANDROID_JAR to platforms/android-35/android.jar}"
-VERSION_CODE=1
-VERSION_NAME=1.0
+VERSION_CODE=2
+VERSION_NAME=1.1
 
 W=$(mktemp -d)
 trap 'rm -rf "$W"' EXIT
