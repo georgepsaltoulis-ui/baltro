@@ -31,6 +31,8 @@ _forced = os.environ.get("ARROWBOT_ON_PHONE")   # "1" / "0": ArrowBot.py --on-ph
 ON_PHONE = (IN_TERMUX or IN_TERMINAL_APP) if _forced not in ("0", "1") else _forced == "1"
 VM = ON_PHONE and not IN_TERMUX   # the phone is another machine on the network, not 127.0.0.1
 TERMINAL_APPS = ("virtualization.terminal", os.environ.get("TERMUX_APP__PACKAGE_NAME") or "com.termux")
+if os.environ.get("ARROWBOT_APP_PACKAGE"):    # the bot inside the ArrowBot app: opening the app pauses it
+    TERMINAL_APPS += (os.environ["ARROWBOT_APP_PACKAGE"],)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ADDRESS_FILE = os.path.join(HERE, "Temp", "phone_address.txt")   # the phone's Wi-Fi IP (VM only)

@@ -7,56 +7,50 @@ or on the phone itself with no computer.
 The phone's screen stays on while the bot plays. When the bot stops, the phone's normal screen
 timeout is put back.
 
-## Stopping it
+## On the phone: just the ArrowBot app (recommended)
 
-- **Stop button:** while the bot plays, the phone shows an *Arrow bot is playing* notification. Pull
-  down the notification shade and tap it (or swipe it away) to stop the bot, even with the game open.
-- **In the terminal:** open the terminal the bot runs in. The bot pauses while it's open. Tap **ESC**
-  in the key row above the keyboard (or press `q`) to stop it. Go back to the game to let it carry on.
+One app with the bot inside. You don't need Termux, Wi-Fi, a hotspot or a computer. Mobile data is
+only needed to download it.
+
+1. **Install it.** In the phone's browser, open
+   https://github.com/georgepsaltoulis-ui/baltro/raw/HEAD/ArrowBot.apk and install it (36 MB, for
+   64-bit phones such as Pixels).
+   - Allow your browser to install apps if Android asks.
+   - If Play Protect warns, tap *Install anyway*. It's a sideloaded app that uses accessibility.
+   - If you had the earlier *ArrowBot Helper*, this installs over it.
+2. **Turn it on, once.** Open *ArrowBot*, tap *Turn on in Accessibility*, and turn on *ArrowBot*.
+   If Android says the setting is restricted, go to Settings > Apps > ArrowBot, open the menu at the
+   top right, tap *Allow restricted settings*, and try again.
+3. **Tap "Start bot".** Then tap *Start now* to allow screen capture, choosing *Entire screen* if
+   it asks. Android asks this every time the bot starts.
+
+The bot then opens the game and plays, and the screen stays on. The app's screen shows what the bot
+is doing.
+
+**Stopping it:** tap **Stop bot** in the app or in its notification. Opening the app while the bot
+plays pauses it; going back to the game lets it carry on.
+
+It plays the same way as on a computer. It's the same `bot.py`, with Python 3.10, NumPy and OpenCV
+inside the app:
+
+- The app streams the screen at 60 frames a second, like scrcpy did, and the bot always takes the
+  newest frame.
+- Taps go out at the bot's usual pace, one every 50 ms, queued so they never cut each other off.
+
+The bot runs in a separate process inside the app, the way `ArrowBot.py` runs it as a child process
+on a computer. Stopping it ends that process.
+
+**Termux instead:** the app also lets the bot run from Termux. Run `pkg install python`, then
+`python ArrowBot.py`. It finds the app by itself, and the phone asks once to allow it.
+
+The app only listens to programs on the phone itself (127.0.0.1): its own bot, or one you allowed.
+
+## Stopping it on a computer, or in a terminal
+
+- **Stop button:** while the bot plays, the phone shows an *Arrow bot is playing* notification. Tap
+  it (or swipe it away) to stop the bot, even with the game open.
+- **In the terminal:** the bot pauses while the terminal is open. Press **ESC** (or `q`) to stop it.
 - **Ctrl+C** works too.
-
-## On the phone: no Wi-Fi, no computer (recommended)
-
-This runs in **Termux** together with the small **ArrowBot Helper** app. The app does the tapping
-and sees the screen through Android's accessibility and screen-capture features, so the bot needs
-no `adb`, no Wi-Fi, no hotspot and no computer. Mobile data is only used for downloading.
-
-1. **Install the helper app.** In the phone's browser, open
-   https://github.com/georgepsaltoulis-ui/baltro/raw/HEAD/ArrowBotHelper.apk and install it. Allow
-   your browser to install apps if Android asks, and tap *Install anyway* if Play Protect warns:
-   it's a sideloaded app that uses accessibility.
-2. **Turn it on.** Open *ArrowBot Helper* and tap *1. Open Accessibility settings*, then turn on
-   *ArrowBot Helper*. If Android says the setting is restricted, go to Settings > Apps >
-   ArrowBot Helper, open the menu at the top right, tap *Allow restricted settings*, and try again.
-3. **Start the bot in Termux:**
-
-   ```sh
-   pkg install -y python
-   python -c "import urllib.request as u; u.urlretrieve('https://raw.githubusercontent.com/georgepsaltoulis-ui/baltro/HEAD/ArrowBot.py', 'ArrowBot.py')"
-   python ArrowBot.py
-   ```
-
-   The first start installs what it needs: OpenCV (from Termux's `x11-repo`) and NumPy.
-4. **Answer the phone's questions.**
-   - The first time, tap *Allow* in the "Allow the Arrow bot to control this phone?"
-     notification.
-   - Each time the bot starts, tap *Start now* to allow screen capture. Pick *Entire screen* if it
-     asks.
-
-The bot then opens the game and plays. The screen stays on while it plays.
-
-To stop it, tap **Stop bot** in the *Arrow bot* notification. You can also switch to Termux (the
-bot pauses) and press ESC, `q` or Ctrl+C.
-
-It plays the same way as on a computer:
-
-- The helper streams the screen at 60 frames a second, like scrcpy did, and the bot always takes
-  the newest frame.
-- Taps go out at the bot's usual pace, one every 50 ms. The app queues them, so they never cut
-  each other off.
-
-The helper app only listens to programs on the phone itself (127.0.0.1), and only after you
-tapped *Allow*. Its source is in `helper/`. Rebuild it with `helper/build_apk.sh`.
 
 ## On the phone with Wi-Fi: Android's Terminal app
 
@@ -129,11 +123,24 @@ python ArrowBot.py            # --show: also show the phone screen in a window
 
 ## Changing the bot
 
-The source is in `src/`:
+The bot is in `src/`:
 
 - `launcher.py`: the top of `ArrowBot.py`.
 - `bot.py`: the bot.
 - `onphone.py`: the on-phone connection.
+- `bridge.py`: talks to the app.
 - Templates and scrcpy.
 
 After editing, run `python build.py` to pack them into `ArrowBot.py` again.
+
+The app is in `android/`: the Java part plus `app/src/main/python/app_main.py`. It takes the bot's
+files from `src/` when it's built. It needs the Android SDK (platform 35) and Python 3.10 on the
+build machine:
+
+```sh
+cd android
+ANDROID_HOME=/path/to/android-sdk ./gradlew -PbuildPython=/path/to/python3.10 :app:assembleRelease
+cp app/build/outputs/apk/release/app-release.apk ../ArrowBot.apk
+```
+
+It's signed with `android/app/helper.keystore`, so updates install over the old app.

@@ -362,6 +362,7 @@ class ScrcpyLink:
         time.sleep(hold)
         self._touch(ACTION_UP, x, y)
 
+stopping = False         # stop_bot() is shutting everything down (no more complaints about it)
 link = None              # ScrcpyLink when the fast path is up
 link_video = False       # use its video frames (checked against a real screenshot first)
 GESTURE_TIMEOUT = 8      # seconds before a hung zoom/pan is abandoned
@@ -659,7 +660,7 @@ def connect_helper():
             print(bridge.SETUP_HELP)
             told = True
         time.sleep(2)
-    print("[*] Connecting to the ArrowBot Helper app...")
+    print("[*] Connecting to the ArrowBot app (taps + screen)...")
     helper = bridge.Helper()
     helper.connect()                 # the first time, the phone asks "Allow?"
     keep_phone_awake()
@@ -834,7 +835,9 @@ class FrameGrabber:
                             self.frame, self.t = f, t
                             self.cond.notify_all()
                     continue
-                print("[!] scrcpy video stopped; back to screenshots.")
+                if not stopping:
+                    print("[!] The live picture stopped; back to screenshots." if BRIDGE_MODE else
+                          "[!] scrcpy video stopped; back to screenshots.")
             t = time.time()
             f = capture_frame()
             if f is None:
@@ -3703,7 +3706,9 @@ def run_solver(deadline=None):
             last_terminal_check = current_time
             if terminal_in_front():
                 tapper.clear(wait=False)
-                print("[*] Paused while the terminal is open. Tap ESC (or press q) here to stop the bot;"
+                print("[*] Paused while ArrowBot is open. \"Stop bot\" stops it; go back to the game to carry on."
+                      if os.environ.get("ARROWBOT_APP_PACKAGE") else
+                      "[*] Paused while the terminal is open. Tap ESC (or press q) here to stop the bot;"
                       " go back to the game to carry on.")
                 while terminal_in_front():
                     time.sleep(1.0)
@@ -4473,6 +4478,8 @@ def show_stopped():
 def stop_bot(why):
     """Stop the same way Ctrl+C does: no more taps, phone screen back on, scrcpy closed, the
     phone's sleep setting restored - and exit code 0, so the supervisor doesn't restart it."""
+    global stopping
+    stopping = True
     print(f"\n[*] {why}: stopping the bot...")
     alone = os.environ.get("ARROWBOT_SUPERVISED") != "1"   # (else the supervisor does the last two)
     for step in (lambda: tapper is not None and tapper.stop(),
@@ -4620,6 +4627,27 @@ class StopButton:
                     self.show()            # taken away by "Clear all": put it back
 
         threading.Thread(target=watch, daemon=True).start()
+
+
+def run_embedded():
+    """The bot inside the ArrowBot app (Chaquopy, see android/app/src/main/python/app_main.py): what
+    the --child process does, without the supervisor - the app runs it in a process of its own, and
+    stopping it ends that process. Talks to the app's helper part (BRIDGE_MODE)."""
+    sys.stdout = _UserOut(sys.stdout)
+    atexit.register(show_stopped)
+    print(f"===== bot started {time.strftime('%Y-%m-%d %H:%M:%S')} =====")
+    connect()
+    StopButton().start()
+    print('[*] To stop the bot: "Stop bot" in the ArrowBot app or its notification.')
+    while True:
+        try:
+            run_solver()
+        except Exception:
+            # Never quit on an unexpected error: log it in full and carry on
+            import traceback
+            print("[!!] Unexpected error, continuing:")
+            traceback.print_exc()
+            time.sleep(2)
 
 
 if __name__ == "__main__":

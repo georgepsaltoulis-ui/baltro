@@ -1,5 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<resources>
-    <string name="app_name">ArrowBot Helper</string>
-    <string name="a11y_description">Lets the Arrow bot (running in Termux on this phone) tap and swipe in the game, and tells it which app is open. Nothing leaves the phone: only programs on this phone that you allowed can use it.</string>
-</resources>

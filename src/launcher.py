@@ -22,10 +22,9 @@ next to this file (again only when this file changes). Needs Python 3 with:
     pip install opencv-python numpy uiautomator2 av
 (uiautomator2 is installed automatically if it's missing). adb comes bundled.
 
-ON THE PHONE, NO WI-FI, NO COMPUTER: Termux + the ArrowBot Helper app (ArrowBotHelper.apk, from
-https://github.com/georgepsaltoulis-ui/baltro/raw/HEAD/ArrowBotHelper.apk). Install it, open it and
-turn it on in Accessibility; then in Termux: pkg install python, python ArrowBot.py. The phone asks
-once to allow the bot and to allow screen capture. "Stop bot" in its notification stops the bot.
+ON THE PHONE, NO WI-FI, NO COMPUTER, NO TERMUX: the ArrowBot app has this bot inside. Install
+https://github.com/georgepsaltoulis-ui/baltro/raw/HEAD/ArrowBot.apk, turn it on in Accessibility, tap
+"Start bot". (Termux works with that app too: pkg install python, python ArrowBot.py.)
 
 ON THE PHONE (no computer) in Android's Terminal app: Settings > System > Developer options >
 "Linux development environment" on, open the Terminal app, put ArrowBot.py in Downloads, then:

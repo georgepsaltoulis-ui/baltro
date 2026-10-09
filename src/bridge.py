@@ -1,6 +1,6 @@
 """
-Talks to the ArrowBot Helper app on the phone instead of adb: no Wi-Fi, no computer, no pairing.
-The app (ArrowBotHelper.apk) taps and swipes through Android's accessibility service and sees the
+Talks to the ArrowBot app (its accessibility + screen-capture part) instead of adb: no Wi-Fi, no computer, no pairing.
+The app (ArrowBot.apk) taps and swipes through Android's accessibility service and sees the
 screen through screen capture; it listens on 127.0.0.1:47123 for this bot (running in Termux on
 the same phone). Each program has to be allowed once on the phone ("Allow" in a notification);
 the bot's random token for that is kept in Temp/helper_token.txt.
@@ -20,22 +20,22 @@ import numpy as np
 HOST, PORT = "127.0.0.1", 47123
 HERE = os.path.dirname(os.path.abspath(__file__))
 TOKEN_FILE = os.path.join(HERE, "Temp", "helper_token.txt")
-APK_URL = "https://github.com/georgepsaltoulis-ui/baltro/raw/HEAD/ArrowBotHelper.apk"
+APK_URL = "https://github.com/georgepsaltoulis-ui/baltro/raw/HEAD/ArrowBot.apk"
 
-SETUP_HELP = f"""[!] No Wi-Fi needed: the bot can play through the ArrowBot Helper app instead.
+SETUP_HELP = f"""[!] No Wi-Fi needed: the bot can play through the ArrowBot app instead (it has the bot
+    inside too: with it you don't need Termux at all - just tap "Start bot" in the app).
     1. Download and install it (tap the link in your phone's browser; allow installing from it):
          {APK_URL}
-    2. Open "ArrowBot Helper", tap "1. Open Accessibility settings" and turn "ArrowBot Helper" on.
-       If Android says the setting is restricted: Settings > Apps > ArrowBot Helper > the menu at the
+    2. Open "ArrowBot", tap "Turn on in Accessibility" and turn "ArrowBot" on.
+       If Android says the setting is restricted: Settings > Apps > ArrowBot > the menu at the
        top right > "Allow restricted settings", then try again.
     3. Come back here: the bot finds it by itself.
     Waiting for the helper app... (Ctrl+C to stop)"""
 
 APPROVE_HELP = """[!] On the phone: tap "Allow" in the "Allow the Arrow bot to control this phone?" notification
-    (or open ArrowBot Helper and tap "Allow the waiting program")."""
+    (or open ArrowBot and tap "Allow the waiting program")."""
 
-CAPTURE_HELP = """[!] On the phone: allow screen capture - tap "Start now" (choose "Entire screen" if it asks).
-    (No question showing? Open ArrowBot Helper and tap "Start screen capture".)"""
+CAPTURE_HELP = """[!] On the phone: allow screen capture - tap "Start now" (choose "Entire screen" if it asks)."""
 
 
 class HelperError(Exception):
@@ -54,6 +54,8 @@ def available(timeout=1.0):
 
 
 def _token():
+    if os.environ.get("ARROWBOT_HELPER_TOKEN"):      # the bot inside the ArrowBot app: allowed already
+        return os.environ["ARROWBOT_HELPER_TOKEN"]
     try:
         with open(TOKEN_FILE) as f:
             t = f.read().strip()
