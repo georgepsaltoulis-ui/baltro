@@ -2,13 +2,19 @@ package com.arrowbot.helper;
 
 import android.accessibilityservice.AccessibilityService;
 import android.accessibilityservice.GestureDescription;
+import android.content.BroadcastReceiver;
+import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
+import android.graphics.Color;
 import android.graphics.Path;
 import android.graphics.PixelFormat;
 import android.graphics.Rect;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.Looper;
+import android.os.PowerManager;
+import android.os.SystemClock;
 import android.util.Log;
 import android.view.Gravity;
 import android.view.View;
@@ -35,18 +41,21 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
 /**
- * The accessibility service: taps, swipes and pinches for the bot (Android's gesture API, no adb),
- * Back / Home, opening the game, which app is open, whether the status bar shows, and keeping the
- * screen on. It also runs the little server the bot talks to: 127.0.0.1 only (nothing outside the
- * phone can reach it), and every program has to be allowed once on the phone (Approvals).
+ * The accessibility service: taps, swipes and pinches for the bot (Android's gesture API), Back /
+ * Home, opening the game, which app is open, whether the status bar shows, and keeping the screen
+ * on. It also runs the little server the bot talks to: 127.0.0.1 only (nothing outside the phone
+ * can reach it), and every program has to be allowed once on the phone (Approvals).
+ *
+ * With adb (Wireless debugging, see Adb), frames, taps and the screen's power go through scrcpy
+ * instead (ScrcpyEngine), as on a computer; without it, through screen capture and gestures.
  *
  * Protocol: one text line per request, one text line back ("OK ..." / "ERR ..."); FRAME answers
- * with a header line followed by the raw RGBA pixels. Commands: see serve().
+ * with a header line followed by the raw pixels. Commands: see serve().
  */
 public class HelperService extends AccessibilityService {
     static final String TAG = "ArrowBotHelper";
     static final int PORT = 47123;
-    static final String VERSION = "ArrowBotHelper 2";
+    static final String VERSION = "ArrowBotHelper 3";
 
     static volatile HelperService instance;
     /** When the user last tapped "Stop bot" (ms, wall clock): bot sessions started before that stop. */
@@ -63,6 +72,30 @@ public class HelperService extends AccessibilityService {
     private volatile String lastPackage = "";
     private View keepOnView;
     private int keepOnCount = 0;
+    /** Black overlay covering the screen ("screen off" without adb), and how many asked for it. */
+    private View blackView;
+    private int blackCount = 0;
+    /** When the user last turned the screen on/off with the power button (ms, wall clock): a bot
+     *  that started before that doesn't turn the screen off again. */
+    static volatile long userScreenAt = 0;
+    /** Screen-off requests in effect (any mode): the power button ends them. */
+    private int screenOffCount = 0;
+    private static volatile boolean captureStarting = false;
+
+    private final BroadcastReceiver screenEvents = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context c, Intent i) {
+            if (!Intent.ACTION_SCREEN_OFF.equals(i.getAction())) return;
+            synchronized (HelperService.this) {
+                if (screenOffCount == 0) return;    // the screen was on: a normal power press
+            }
+            // The screen was off for the bot and the power button was pressed: the user wants to
+            // see the screen. It went off for real now (the game pauses): turn it on, for good.
+            userScreenAt = System.currentTimeMillis();
+            setBlack(false, true);
+            wakeScreen();
+        }
+    };
 
     @Override
     protected void onServiceConnected() {
@@ -71,6 +104,11 @@ public class HelperService extends AccessibilityService {
         gestureThread = new HandlerThread("gestures");
         gestureThread.start();
         gestureHandler = new Handler(gestureThread.getLooper());
+        if (android.os.Build.VERSION.SDK_INT >= 33) {
+            registerReceiver(screenEvents, new IntentFilter(Intent.ACTION_SCREEN_OFF), RECEIVER_NOT_EXPORTED);
+        } else {
+            registerReceiver(screenEvents, new IntentFilter(Intent.ACTION_SCREEN_OFF));
+        }
         startServer();
     }
 
@@ -88,6 +126,10 @@ public class HelperService extends AccessibilityService {
     @Override
     public void onDestroy() {
         instance = null;
+        try {
+            unregisterReceiver(screenEvents);
+        } catch (RuntimeException ignored) {
+        }
         try {
             if (server != null) server.close();
         } catch (IOException ignored) {
@@ -138,8 +180,41 @@ public class HelperService extends AccessibilityService {
         out.flush();
     }
 
+    /** Where frames come from: scrcpy over adb when it runs, else screen capture (or nothing). */
+    static FrameSource source() {
+        ScrcpyEngine e = ScrcpyEngine.current();
+        if (e != null) return e;
+        CaptureService c = CaptureService.instance;
+        return c != null && c.alive() ? c : null;
+    }
+
+    static String mode() {
+        FrameSource s = source();
+        return s instanceof ScrcpyEngine ? "adb" : s != null ? "capture" : "none";
+    }
+
+    /** Frames on: scrcpy over adb if this phone has it (Wireless debugging), else Android's screen
+     *  capture (asks on the phone). In the background: the caller polls INFO / MODE. */
+    void startFrames() {
+        if (source() != null || captureStarting) return;
+        captureStarting = true;
+        new Thread(() -> {
+            try {
+                if (ScrcpyEngine.ensure(this, msg -> CaptureService.setBotState(msg)) == null && !CaptureService.running()) {
+                    Intent i = new Intent(this, MainActivity.class)
+                            .putExtra(MainActivity.EXTRA_CAPTURE, true)
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                    startActivity(i);
+                }
+            } finally {
+                captureStarting = false;
+            }
+        }, "start-frames").start();
+    }
+
     private void serve(Socket socket) {
-        boolean keepOn = false;
+        boolean keepOn = false, screenOff = false;
+        boolean screenOffAdb = false;
         boolean allowed = false;
         long helloAt = 0;
         byte[] frame = null;
@@ -175,66 +250,83 @@ public class HelperService extends AccessibilityService {
                             send(out, "OK " + VERSION);
                             break;
                         }
-                        case "INFO": {
-                            int[] wh = screenSize();
-                            send(out, "OK " + wh[0] + " " + wh[1] + " " + (CaptureService.running() ? 1 : 0));
+                        case "INFO": {      // frame size (= tap coordinates), frames on (1/0)
+                            FrameSource src = source();
+                            int[] wh = src != null ? src.size() : screenSize();
+                            send(out, "OK " + wh[0] + " " + wh[1] + " " + (src != null ? 1 : 0));
                             break;
                         }
-                        case "CAPTURE":     // make sure the screen is being captured (asks on the phone)
-                            if (CaptureService.running()) {
+                        case "MODE":        // adb (scrcpy over adb) / capture (screen capture) / none
+                            send(out, "OK " + mode() + " " + ScrcpyEngine.status.replace('\n', ' '));
+                            break;
+                        case "CAPTURE":     // make sure frames come (adb, or screen capture: asks on the phone)
+                            if (source() != null) {
                                 send(out, "OK 1");
                             } else {
-                                Intent i = new Intent(this, MainActivity.class)
-                                        .putExtra(MainActivity.EXTRA_CAPTURE, true)
-                                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-                                startActivity(i);
+                                startFrames();
                                 send(out, "OK 0");
                             }
                             break;
-                        case "FRAME": {     // FRAME <after_seq>: the newest frame newer than that
-                            CaptureService cap = CaptureService.instance;
-                            if (cap == null) { send(out, "NONE nocapture"); break; }
-                            int[] wh = cap.size();
-                            int need = wh[0] * wh[1] * 4;
+                        case "FRAME": {     // FRAME <after_seq> [YUV]: the newest frame newer than that
+                            FrameSource src = source();
+                            if (src == null) { send(out, "NONE nocapture"); break; }
+                            boolean yuv = a.length > 2 && a[2].equals("YUV");
+                            int need = src.maxFrameBytes();
                             if (frame == null || frame.length < need) frame = new byte[need];
-                            long[] f = cap.copyFrame(Long.parseLong(a[1]), 100, frame);
+                            long[] f = src.copyFrame(Long.parseLong(a[1]), 100, frame);
                             if (f == null) { send(out, "NONE timeout"); break; }
-                            send(out, "FRAME " + f[0] + " " + f[1] + " " + f[2] + " " + f[3]);
-                            out.write(frame, 0, (int) (f[1] * f[2] * 4));
+                            if (f[4] != FrameSource.RGBA && !yuv) { send(out, "NONE update ArrowBot.py"); break; }
+                            send(out, "FRAME " + f[0] + " " + f[1] + " " + f[2] + " " + f[3] + " " + FrameSource.FORMATS[(int) f[4]]);
+                            out.write(frame, 0, (int) f[5]);
                             out.flush();
                             break;
                         }
-                        case "STREAM": {    // STREAM <max_fps>: from now on, every new frame (like scrcpy's video)
+                        case "STREAM": {    // STREAM <max_fps> [YUV]: from now on, every new frame (like scrcpy's video)
                             int fps = a.length > 1 ? Math.max(1, Integer.parseInt(a[1])) : 60;
+                            boolean yuv = a.length > 2 && a[2].equals("YUV");
                             long gapNs = 1_000_000_000L / fps, lastNs = 0, last = 0;
+                            FrameSource was = null;
                             s.setSendBufferSize(4 << 20);
                             while (true) {
-                                CaptureService cap = CaptureService.instance;
-                                if (cap == null) { send(out, "NONE nocapture"); return; }
+                                FrameSource src = source();
+                                if (src == null) { send(out, "NONE nocapture"); return; }
+                                if (src != was) last = 0;           // switched between adb and capture
+                                was = src;
                                 long wait = lastNs + gapNs - System.nanoTime();
                                 if (wait > 0) Thread.sleep(wait / 1_000_000, (int) (wait % 1_000_000));
-                                int[] wh = cap.size();
-                                int need = wh[0] * wh[1] * 4;
+                                int need = src.maxFrameBytes();
                                 if (frame == null || frame.length < need) frame = new byte[need];
-                                long[] f = cap.copyFrame(last, 100, frame);
+                                long[] f = src.copyFrame(last, 100, frame);
                                 if (f == null) continue;
+                                if (f[4] != FrameSource.RGBA && !yuv) { send(out, "NONE update ArrowBot.py"); return; }
                                 lastNs = System.nanoTime();
                                 last = f[0];
-                                send(out, "FRAME " + f[0] + " " + f[1] + " " + f[2] + " " + f[3]);
-                                out.write(frame, 0, (int) (f[1] * f[2] * 4));
+                                send(out, "FRAME " + f[0] + " " + f[1] + " " + f[2] + " " + f[3] + " " + FrameSource.FORMATS[(int) f[4]]);
+                                out.write(frame, 0, (int) f[5]);
                                 out.flush();
                             }
                         }
-                        case "TAP":         // TAP x y hold_ms
-                            send(out, tap(f(a[1]), f(a[2]), l(a[3])) ? "OK" : "ERR cancelled");
+                        case "TAP": {       // TAP x y hold_ms
+                            ScrcpyEngine e = ScrcpyEngine.current();
+                            boolean ok = e != null ? e.tap(f(a[1]), f(a[2]), l(a[3])) : tap(f(a[1]), f(a[2]), l(a[3]));
+                            send(out, ok ? "OK" : "ERR cancelled");
                             break;
-                        case "DRAG":        // DRAG x0 y0 x1 y1 move_ms hold_ms
-                            send(out, drag(f(a[1]), f(a[2]), f(a[3]), f(a[4]), l(a[5]), l(a[6])) ? "OK" : "ERR cancelled");
+                        }
+                        case "DRAG": {      // DRAG x0 y0 x1 y1 move_ms hold_ms
+                            ScrcpyEngine e = ScrcpyEngine.current();
+                            boolean ok = e != null ? e.drag(f(a[1]), f(a[2]), f(a[3]), f(a[4]), l(a[5]), l(a[6]))
+                                    : drag(f(a[1]), f(a[2]), f(a[3]), f(a[4]), l(a[5]), l(a[6]));
+                            send(out, ok ? "OK" : "ERR cancelled");
                             break;
-                        case "PINCH":       // PINCH ax0 ay0 bx0 by0 ax1 ay1 bx1 by1 ms
-                            send(out, pinch(f(a[1]), f(a[2]), f(a[3]), f(a[4]), f(a[5]), f(a[6]), f(a[7]), f(a[8]),
-                                    l(a[9])) ? "OK" : "ERR cancelled");
+                        }
+                        case "PINCH": {     // PINCH ax0 ay0 bx0 by0 ax1 ay1 bx1 by1 ms
+                            ScrcpyEngine e = ScrcpyEngine.current();
+                            boolean ok = e != null
+                                    ? e.pinch(f(a[1]), f(a[2]), f(a[3]), f(a[4]), f(a[5]), f(a[6]), f(a[7]), f(a[8]), l(a[9]))
+                                    : pinch(f(a[1]), f(a[2]), f(a[3]), f(a[4]), f(a[5]), f(a[6]), f(a[7]), f(a[8]), l(a[9]));
+                            send(out, ok ? "OK" : "ERR cancelled");
                             break;
+                        }
                         case "BACK":
                             send(out, inTurn(() -> performGlobalAction(GLOBAL_ACTION_BACK)) ? "OK" : "ERR");
                             break;
@@ -264,6 +356,33 @@ public class HelperService extends AccessibilityService {
                             send(out, "OK");
                             break;
                         }
+                        case "SCREEN": {    // SCREEN 0|1: screen off while this connection lasts (power button: on)
+                            boolean off = a[1].equals("0");
+                            if (off && !screenOff) {
+                                if (userScreenAt > helloAt) { send(out, "OK on user"); break; }
+                                ScrcpyEngine e = ScrcpyEngine.current();
+                                if (e != null) {            // adb: the panel itself off (like scrcpy on a computer)
+                                    if (!e.displayPower(false)) { send(out, "ERR scrcpy stopped"); break; }
+                                    screenOffAdb = true;
+                                } else {
+                                    String why = blackOverlay();
+                                    if (why != null) { send(out, "ERR " + why); break; }
+                                    screenOffAdb = false;
+                                }
+                                screenOff = true;
+                                synchronized (this) {
+                                    screenOffCount++;
+                                }
+                                send(out, "OK off " + (screenOffAdb ? "adb" : "overlay"));
+                            } else if (!off && screenOff) {
+                                screenOn(screenOffAdb);
+                                screenOff = false;
+                                send(out, "OK on");
+                            } else {
+                                send(out, "OK " + (screenOff ? "off" : "on"));
+                            }
+                            break;
+                        }
                         case "POLL":        // did the user tap "Stop bot" since this bot started?
                             send(out, stopRequestedAt > helloAt ? "OK stop" : "OK run");
                             break;
@@ -283,6 +402,123 @@ public class HelperService extends AccessibilityService {
         } catch (IOException ignored) {
         } finally {
             if (keepOn) keepScreenOn(false);
+            if (screenOff) screenOn(screenOffAdb);
+        }
+    }
+
+    // ------------------------------------------------------------------ screen off
+
+    /** Screen "off" without adb: a black overlay over everything, at the lowest brightness (on
+     *  these OLED screens black pixels are off). The game keeps running under it and the bot keeps
+     *  seeing it - if the screen capture shows just the game ("A single app"), not the overlay.
+     *  Returns null, or why it can't. */
+    private String blackOverlay() throws InterruptedException {
+        CaptureService cap = CaptureService.instance;
+        byte[] buf = cap != null ? new byte[cap.maxFrameBytes()] : null;
+        long[] before = cap != null ? cap.copyFrame(0, 0, buf) : null;
+        boolean wasDark = before == null || dark(buf, before);
+        setBlack(true, false);
+        if (cap == null || wasDark) return null;     // (can't tell: keep it)
+        SystemClock.sleep(400);
+        long[] after = cap.copyFrame(before[0], 1000, buf);
+        if (after != null && dark(buf, after)) {
+            setBlack(false, false);
+            return "the screen capture shows the whole screen, so the black screen would hide the game "
+                    + "from the bot. Next start, allow \"A single app\" > Arrows instead of \"Entire screen\".";
+        }
+        return null;
+    }
+
+    /** All (sampled) pixels of an RGBA frame are black. */
+    private static boolean dark(byte[] rgba, long[] f) {
+        int w = (int) f[1], h = (int) f[2];
+        for (int y = h / 20; y < h; y += Math.max(1, h / 40)) {
+            for (int x = w / 40; x < w; x += Math.max(1, w / 20)) {
+                int i = (y * w + x) * 4;
+                if ((rgba[i] & 0xFF) > 12 || (rgba[i + 1] & 0xFF) > 12 || (rgba[i + 2] & 0xFF) > 12) return false;
+            }
+        }
+        return true;
+    }
+
+    private void screenOn(boolean adb) {
+        synchronized (this) {
+            screenOffCount = Math.max(0, screenOffCount - 1);
+        }
+        if (adb) {
+            ScrcpyEngine e = ScrcpyEngine.current();
+            if (e != null) e.displayPower(true);
+        } else {
+            setBlack(false, false);
+        }
+    }
+
+    /** Black overlay on (one more request) / off (one less, or all of them). */
+    private void setBlack(boolean on, boolean all) {
+        CountDownLatch done = new CountDownLatch(1);
+        main.post(() -> {
+            try {
+                blackCount = all ? 0 : Math.max(0, blackCount + (on ? 1 : -1));
+                WindowManager wm = getSystemService(WindowManager.class);
+                if (blackCount > 0 && blackView == null) {
+                    blackView = new View(this);
+                    blackView.setBackgroundColor(Color.BLACK);
+                    int[] wh = screenSize();
+                    WindowManager.LayoutParams lp = new WindowManager.LayoutParams(wh[0], wh[1],
+                            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                                    | WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+                                    | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+                                    | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                            PixelFormat.OPAQUE);
+                    lp.gravity = Gravity.TOP | Gravity.START;
+                    lp.screenBrightness = 0f;           // as dark as the screen goes
+                    if (android.os.Build.VERSION.SDK_INT >= 28) {
+                        lp.layoutInDisplayCutoutMode = android.os.Build.VERSION.SDK_INT >= 30
+                                ? WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+                                : WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+                    }
+                    if (android.os.Build.VERSION.SDK_INT >= 30) lp.setFitInsetsTypes(0);
+                    try {
+                        wm.addView(blackView, lp);
+                    } catch (RuntimeException e) {
+                        Log.w(TAG, "black overlay failed", e);
+                        blackView = null;
+                    }
+                } else if (blackCount == 0 && blackView != null) {
+                    try {
+                        wm.removeView(blackView);
+                    } catch (RuntimeException ignored) {
+                    }
+                    blackView = null;
+                }
+            } finally {
+                done.countDown();
+            }
+        });
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            try {
+                done.await(2, TimeUnit.SECONDS);
+            } catch (InterruptedException ignored) {
+            }
+        }
+        if (all) {
+            synchronized (this) {
+                screenOffCount = 0;
+            }
+        }
+    }
+
+    /** Turn the screen on (after the power button turned it off while it was "off" for the bot). */
+    @SuppressWarnings("deprecation")
+    private void wakeScreen() {
+        try {
+            PowerManager pm = getSystemService(PowerManager.class);
+            PowerManager.WakeLock wl = pm.newWakeLock(PowerManager.SCREEN_BRIGHT_WAKE_LOCK
+                    | PowerManager.ACQUIRE_CAUSES_WAKEUP | PowerManager.ON_AFTER_RELEASE, "ArrowBot:wake");
+            wl.acquire(1000);
+        } catch (RuntimeException e) {
+            Log.w(TAG, "wake", e);
         }
     }
 

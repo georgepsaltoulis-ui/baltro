@@ -1,12 +1,13 @@
 """
-Talks to the ArrowBot app (its accessibility + screen-capture part) instead of adb: no Wi-Fi, no computer, no pairing.
-The app (ArrowBot.apk) taps and swipes through Android's accessibility service and sees the
-screen through screen capture; it listens on 127.0.0.1:47123 for this bot (running in Termux on
-the same phone). Each program has to be allowed once on the phone ("Allow" in a notification);
-the bot's random token for that is kept in Temp/helper_token.txt.
+Talks to the ArrowBot app instead of running adb itself: no computer needed. The app listens on
+127.0.0.1:47123 for this bot (inside the app, or in Termux on the same phone). It plays through
+scrcpy over its own adb connection when the phone has Wireless debugging (as on a computer: video,
+taps, screen off), else through Android's accessibility service (taps, swipes) and screen capture.
+Each program has to be allowed once on the phone ("Allow" in a notification); the bot's random
+token for that is kept in Temp/helper_token.txt (the bot inside the app has its own).
 
-HelperLink offers the same calls as bot.py's ScrcpyLink (frames, tap, drag, pinch), so the bot
-plays the same way through either.
+HelperLink offers the same calls as bot.py's ScrcpyLink (frames, tap, drag, pinch, display power),
+so the bot plays the same way through either.
 """
 import os
 import secrets
@@ -35,7 +36,30 @@ SETUP_HELP = f"""[!] No Wi-Fi needed: the bot can play through the ArrowBot app 
 APPROVE_HELP = """[!] On the phone: tap "Allow" in the "Allow the Arrow bot to control this phone?" notification
     (or open ArrowBot and tap "Allow the waiting program")."""
 
-CAPTURE_HELP = """[!] On the phone: allow screen capture - tap "Start now" (choose "Entire screen" if it asks)."""
+CAPTURE_HELP = """[!] On the phone: allow screen capture - choose "A single app" > Arrows (then the screen can be
+    black while the bot plays) and tap "Start" / "Start now"."""
+
+# Frame layouts the app sends: bytes per pixel count, and the conversion to BGR
+FORMATS = {
+    "RGBA": (lambda w, h: w * h * 4, lambda b, w, h: cv2.cvtColor(b.reshape(h, w, 4), cv2.COLOR_RGBA2BGR)),
+    "I420": (lambda w, h: w * h * 3 // 2, lambda b, w, h: cv2.cvtColor(b.reshape(h * 3 // 2, w), cv2.COLOR_YUV2BGR_I420)),
+    "NV12": (lambda w, h: w * h * 3 // 2, lambda b, w, h: cv2.cvtColor(b.reshape(h * 3 // 2, w), cv2.COLOR_YUV2BGR_NV12)),
+    "NV21": (lambda w, h: w * h * 3 // 2, lambda b, w, h: cv2.cvtColor(b.reshape(h * 3 // 2, w), cv2.COLOR_YUV2BGR_NV21)),
+}
+
+
+def _frame_head(head):
+    """FRAME seq w h age [format] -> (seq, w, h, age_ms, format, bytes)."""
+    seq, w, h, age = (int(v) for v in head[1:5])
+    fmt = head[5] if len(head) > 5 else "RGBA"
+    if fmt not in FORMATS:
+        raise HelperError(f"unknown frame format {fmt}")
+    return seq, w, h, age, fmt, FORMATS[fmt][0](w, h)
+
+
+def to_bgr(buf, w, h, fmt):
+    size = FORMATS[fmt][0](w, h)
+    return FORMATS[fmt][1](np.frombuffer(buf, np.uint8, count=size), w, h)
 
 
 class HelperError(Exception):
@@ -164,20 +188,28 @@ class Helper:
         self._conn()
 
     def info(self):
-        w, h, cap = self.call("INFO").split()
+        w, h, cap = self.call("INFO").split()[:3]
         return int(w), int(h), cap == "1"
+
+    def mode(self):
+        """("adb", ...) = scrcpy over the app's own adb; ("capture", ...) = screen capture +
+        accessibility; ("none", ...) = no frames yet. Second: the app's adb status in words."""
+        try:
+            words = self.call("MODE").split(None, 1)
+        except HelperError:
+            return "capture", ""           # (an older app)
+        return words[0], words[1] if len(words) > 1 else ""
 
     def frame(self, after=0):
         """(seq, BGR image, age in s) of the newest frame newer than `after`, or None."""
         for attempt in (0, 1):
             try:
                 c = self._conn()
-                head = c.ask("FRAME", after).split()
+                head = c.ask("FRAME", after, "YUV").split()
                 if head[0] != "FRAME":
                     return None
-                seq, w, h, age = (int(v) for v in head[1:5])
-                rgba = np.frombuffer(c.exactly(w * h * 4), np.uint8).reshape(h, w, 4)
-                return seq, cv2.cvtColor(rgba, cv2.COLOR_RGBA2BGR), age / 1000.0
+                seq, w, h, age, fmt, n = _frame_head(head)
+                return seq, to_bgr(c.exactly(n), w, h, fmt), age / 1000.0
             except (OSError, HelperError):
                 self._drop()
                 if attempt:
@@ -208,11 +240,24 @@ class Helper:
     def status_bar(self):
         return self.call("STATUSBAR") == "1"
 
+    def _awake_conn(self):
+        if self.awake is None:
+            self.awake = _Conn()
+            self.awake.hello(self.token)
+        return self.awake
+
     def keep_awake(self):
         """Screen stays on as long as this connection (thread) lasts: nothing to undo afterwards."""
-        self.awake = _Conn()
-        self.awake.hello(self.token)
-        self.awake.ask("AWAKE", 1)
+        self._awake_conn().ask("AWAKE", 1)
+
+    def screen(self, on):
+        """Screen off / back on, on the same connection: when the bot ends (however it ends), the
+        app turns it back on. Off: with adb the panel itself (like scrcpy), else a black overlay;
+        the power button turns it on. Returns the app's answer ("OK off adb", "ERR why", ...)."""
+        try:
+            return self._awake_conn().ask("SCREEN", 1 if on else 0)
+        except (OSError, HelperError) as e:
+            return f"ERR {e}"
 
     def stop_requested(self):
         return self.call("POLL") == "stop"
@@ -239,7 +284,8 @@ class HelperLink:
 
     Frames come the way scrcpy's video did: the app streams every new frame (up to max_fps; the
     latest again when the screen doesn't change), a thread here keeps receiving them, and only the
-    frames the bot actually uses get converted (RGBA -> BGR) when it asks for one."""
+    frames the bot actually uses get converted to BGR when it asks for one (from YUV with adb, the
+    decoder's own output; from RGBA with screen capture)."""
     POOL = 4                 # frame buffers: the newest, one or two being converted, one being filled
 
     def __init__(self, helper, max_fps=60, log=print):
@@ -249,7 +295,7 @@ class HelperLink:
         self.alive = False
         self.size = None
         self.cond = threading.Condition()
-        self.latest = None    # (buffer, width, height, seq) of the newest frame
+        self.latest = None    # (buffer, width, height, seq, format) of the newest frame
         self.frame_t = 0.0    # (about) when it was captured
         self.frames = 0
         self.in_use = {}      # id(buffer) -> conversions running on it (the reader leaves it alone)
@@ -264,7 +310,7 @@ class HelperLink:
         self.conn = _Conn(timeout=10)
         self.conn.sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 8 << 20)
         self.conn.hello(self.h.token)
-        self.conn.sock.sendall(f"STREAM {self.max_fps}\n".encode())
+        self.conn.sock.sendall(f"STREAM {self.max_fps} YUV\n".encode())
         self.alive = True
         threading.Thread(target=self._receive, daemon=True).start()
         with self.cond:
@@ -298,13 +344,13 @@ class HelperLink:
                 head = self.conn.line().split()
                 if not head or head[0] != "FRAME":
                     raise HelperError(" ".join(head) or "stream ended")
-                seq, w, h, age = (int(v) for v in head[1:5])
-                n = w * h * 4
+                seq, w, h, age, fmt, n = _frame_head(head)
                 buf = self._free_buffer(n)
                 self.conn.exactly(n, into=buf)
                 t = time.time() - age / 1000.0
                 with self.cond:
-                    self.latest = (buf, w, h, seq)
+                    self.latest = (buf, w, h, seq, fmt)
+                    self.size = (w, h)         # = tap coordinates (adb's video can differ a little)
                     self.frame_t = t
                     self.frames += 1
                     self.cond.notify_all()
@@ -322,12 +368,11 @@ class HelperLink:
                                     or not self.alive, timeout=timeout)
             if not ok or not self.alive:
                 return None, 0.0
-            buf, w, h, _ = self.latest
+            buf, w, h, _, fmt = self.latest
             t = self.frame_t
             self.in_use[id(buf)] = self.in_use.get(id(buf), 0) + 1
         try:
-            rgba = np.frombuffer(buf, np.uint8, count=w * h * 4).reshape(h, w, 4)
-            return cv2.cvtColor(rgba, cv2.COLOR_RGBA2BGR), t
+            return to_bgr(buf, w, h, fmt), t
         finally:
             with self.cond:
                 self.in_use[id(buf)] -= 1
@@ -343,4 +388,4 @@ class HelperLink:
         self.h.pinch(a0, b0, a1, b1, max(400, steps * step_time * 1000))
 
     def display_power(self, on):
-        pass     # the screen stays on (the helper keeps it on while the bot runs)
+        return self.h.screen(on)

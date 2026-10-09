@@ -17,6 +17,7 @@ dependencyResolutionManagement {
         google()
         maven { url "https://maven-central.storage-download.googleapis.com/maven2/" }   // Maven Central, Google's mirror
         mavenCentral()
+        maven { url "https://jitpack.io" }      // libadb-android (adb client inside the app)
     }
 }
 rootProject.name = "ArrowBot"

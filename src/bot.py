@@ -130,9 +130,10 @@ SCRCPY_MAX_DIFF = 10     # scrcpy frame must look like a real screenshot (median
 SCRCPY_FPS = 60          # live video frame rate (60 = a frame every ~17ms: changes seen sooner;
                          # 30 saves some battery/USB load)
 SCRCPY_BITRATE = 8_000_000  # video quality; lower = less battery/USB load
-SCREEN_OFF = False       # True: turn the phone's screen off while the bot plays (saves battery; the
-                         # game keeps running). False: the screen stays on the whole time (its
-                         # timeout is held off by keep_phone_awake()), so you can watch the game.
+SCREEN_OFF = True        # True: the phone's screen goes off while the bot plays (saves battery; the
+                         # game keeps running) and the power button turns it back on. False: the
+                         # screen stays on the whole time, so you can watch the game. Either way
+                         # its timeout is held off by keep_phone_awake().
 SCRCPY_VERSION = "5.0"   # version of ./Scrcpy/scrcpy-server (asked from scrcpy.exe on Windows; the
                          # server only starts with its own version, so update this with the server)
 
@@ -666,6 +667,18 @@ def connect_helper():
     keep_phone_awake()
     start_scrcpy()                   # (asks to allow screen capture: before the game covers this)
     wake_and_open_game()
+    if SCREEN_OFF:
+        bridge_screen_off()
+
+def bridge_screen_off():
+    """BRIDGE_MODE: the screen off while the bot plays, once the game is open. With adb the app
+    turns the panel off like scrcpy does on a computer; without, it covers the screen with black.
+    The power button turns it back on (and then it stays on)."""
+    reply = helper.screen(False)
+    if reply.startswith("OK off"):
+        print("[*] Screen off while the bot plays (the game keeps running). Press the power button to turn it on.")
+    elif not reply.startswith("OK"):
+        print(f"[-] The screen stays on: {reply[4:] if reply.startswith('ERR ') else reply}")
 
 def connect():
     if BRIDGE_MODE:
@@ -696,7 +709,10 @@ def start_scrcpy():
         try:
             link = bridge.HelperLink(helper, max_fps=SCRCPY_FPS, log=print).start()
             link_video = True
-            print(f"[+] Helper app up: screen {link.size[0]}x{link.size[1]}, taps and frames through it")
+            mode, _ = helper.mode()
+            print(f"[+] Live picture {link.size[0]}x{link.size[1]}: " + (
+                "scrcpy over the app's adb (Wireless debugging), taps through scrcpy" if mode == "adb" else
+                "screen capture, taps through accessibility (Wireless debugging would let it use scrcpy)"))
         except Exception as e:
             print(f"[-] The helper app can't capture the screen ({e}); trying again in a moment.")
             link, link_video = None, False
@@ -715,7 +731,8 @@ def start_scrcpy():
         if SCREEN_OFF and link_video:
             link.display_power(False)
             atexit.register(restore_screen)
-            print("[*] Phone screen turned off to save battery (the game keeps running).")
+            print("[*] Phone screen turned off to save battery (the game keeps running). "
+                  "Press the phone's power button to turn it on.")
         print(f"[+] scrcpy up: video {link.size[0]}x{link.size[1]}, looks {'the same' if link_video else 'different'} "
               f"as a screenshot (diff {diff:.1f}) -> frames from {'scrcpy' if link_video else 'screenshots'}, taps via scrcpy")
     except Exception as e:
@@ -771,7 +788,9 @@ def ask_show_screen():
 def restore_screen():
     """Screen back on (runs on any exit: Ctrl+C, crash, window closed)."""
     if BRIDGE_MODE:
-        return                     # (never turned off)
+        if helper is not None:     # (the app does it too when the bot's connection ends)
+            helper.screen(True)
+        return
     try:
         if link is not None and link.alive:
             link.display_power(True)

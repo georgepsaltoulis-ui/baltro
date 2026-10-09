@@ -4,8 +4,10 @@ Plays the Android game "Arrows" (`com.arrow.out`). `ArrowBot.py` is the whole bo
 unpacks itself into `ArrowBot_files/` on the first run. It runs on a computer with the phone on USB,
 or on the phone itself with no computer.
 
-The phone's screen stays on while the bot plays. When the bot stops, the phone's normal screen
-timeout is put back.
+The phone's screen goes off while the bot plays, and the game keeps running. Press the power button
+to turn the screen back on; it then stays on until the bot stops. When the bot stops, the screen
+comes back on and the phone's normal screen timeout is put back. To keep the screen on the whole
+time, set `SCREEN_OFF = False` in `src/bot.py`.
 
 ## On the phone: just the ArrowBot app (recommended)
 
@@ -21,21 +23,52 @@ only needed to download it.
 2. **Turn it on, once.** Open *ArrowBot*, tap *Turn on in Accessibility*, and turn on *ArrowBot*.
    If Android says the setting is restricted, go to Settings > Apps > ArrowBot, open the menu at the
    top right, tap *Allow restricted settings*, and try again.
-3. **Tap "Start bot".** Then tap *Start now* to allow screen capture, choosing *Entire screen* if
-   it asks. Android asks this every time the bot starts.
+3. **Tap "Start bot".** If Wireless debugging is on (see below), the bot uses it and nothing is
+   asked. Otherwise Android asks to allow screen capture, every time the bot starts: choose
+   **A single app**, then **Arrows**, and tap *Start*.
 
-The bot then opens the game and plays, and the screen stays on. The app's screen shows what the bot
-is doing.
+The bot then opens the game and plays, and the screen goes off. The app's screen shows what the bot
+is doing; press the power button to see it.
 
 **Stopping it:** tap **Stop bot** in the app or in its notification. Opening the app while the bot
-plays pauses it; going back to the game lets it carry on.
+plays pauses it; going back to the game lets it carry on. The power button turns the screen on
+first.
 
-It plays the same way as on a computer. It's the same `bot.py`, with Python 3.10, NumPy and OpenCV
-inside the app:
+It's the same `bot.py` as on a computer, with Python 3.10, NumPy and OpenCV inside the app. The app
+streams the screen at 60 frames a second and the bot always takes the newest frame. Taps go out at
+the bot's usual pace, one every 50 ms, queued so they never cut each other off.
 
-- The app streams the screen at 60 frames a second, like scrcpy did, and the bot always takes the
-  newest frame.
-- Taps go out at the bot's usual pace, one every 50 ms, queued so they never cut each other off.
+The app plays in one of two ways, and picks by itself:
+
+- **With Wireless debugging (preferred):** the app runs scrcpy over its own adb connection to the
+  phone, like `ArrowBot.py` does on a computer. scrcpy's video is decoded by the phone's hardware
+  decoder, taps go through scrcpy, and the screen's panel really switches off.
+- **Without it:** taps and swipes go through Android's accessibility service, and the bot sees the
+  screen through screen capture. "Screen off" is a black cover over the screen at the lowest
+  brightness (on the Pixel's OLED screen, black pixels are off). The bot still sees the game under
+  it because the capture shows only the Arrows app. If you choose *Entire screen* instead, the
+  capture would show the black cover, so the screen stays on and the app tells you why.
+
+### Wireless debugging (optional)
+
+It needs the phone to be on a Wi-Fi network, any network, with or without internet. Android only
+switches Wireless debugging on while on Wi-Fi. Without Wi-Fi, the app uses the other way by itself.
+
+Once:
+
+1. Settings > System > Developer options > turn on **Wireless debugging**. (Developer options:
+   Settings > About phone > tap *Build number* 7 times.)
+2. In ArrowBot, tap **Pair with Wireless debugging**. Settings opens.
+3. Tap **Wireless debugging**, then **Pair device with pairing code**.
+4. Pull down the notifications and type that code into ArrowBot's notification. The pairing box in
+   Settings has to stay open while you do this; that's why the code goes into the notification.
+   In split screen, you can type it into the app instead.
+
+After that, *Start bot* uses it by itself whenever Wireless debugging is on. The app's screen shows
+which way it's playing (*Live picture: scrcpy over adb* or *screen capture*).
+
+If the phone was set up with `adb tcpip 5555` from a computer (see *No Wi-Fi?* below), the app uses
+that too, with no Wi-Fi. The phone asks "Allow USB debugging?" once.
 
 The bot runs in a separate process inside the app, the way `ArrowBot.py` runs it as a child process
 on a computer. Stopping it ends that process.
@@ -44,11 +77,13 @@ on a computer. Stopping it ends that process.
 `python ArrowBot.py`. It finds the app by itself, and the phone asks once to allow it.
 
 The app only listens to programs on the phone itself (127.0.0.1): its own bot, or one you allowed.
+Its adb key is its own, made on the phone, and is only used to connect to this phone.
 
 ## Stopping it on a computer, or in a terminal
 
 - **Stop button:** while the bot plays, the phone shows an *Arrow bot is playing* notification. Tap
-  it (or swipe it away) to stop the bot, even with the game open.
+  it (or swipe it away) to stop the bot, even with the game open. Press the power button first to
+  turn the screen on.
 - **In the terminal:** the bot pauses while the terminal is open. Press **ESC** (or `q`) to stop it.
 - **Ctrl+C** works too.
 

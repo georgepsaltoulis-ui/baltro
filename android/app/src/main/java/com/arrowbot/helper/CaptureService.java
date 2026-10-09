@@ -31,7 +31,7 @@ import java.nio.ByteBuffer;
  * is always kept, and copied out only when the bot asks for one. Runs as a foreground service, so
  * its notification is always there while capturing - with the "Stop bot" button.
  */
-public class CaptureService extends Service {
+public class CaptureService extends Service implements FrameSource {
     static final String EXTRA_CODE = "code";
     static final String EXTRA_DATA = "data";
     static final String CHANNEL = "capture";
@@ -129,15 +129,28 @@ public class CaptureService extends Service {
         return START_NOT_STICKY;
     }
 
-    int[] size() {
+    @Override
+    public int[] size() {
         return new int[]{width, height};
+    }
+
+    @Override
+    public int maxFrameBytes() {
+        return width * height * 4;
+    }
+
+    @Override
+    public boolean alive() {
+        return instance == this;
     }
 
     /** Copy the newest frame newer than `after` into dest as tight RGBA rows. The screen is only
      *  drawn again when something on it changes: no new frame within repeatMs means the latest one
      *  still shows the screen as it is, so that one comes again with age 0 (scrcpy repeats frames
-     *  the same way). Returns {seq, width, height, age_ms} or null (no capture / no frame yet). */
-    long[] copyFrame(long after, long repeatMs, byte[] dest) {
+     *  the same way). Returns {seq, width, height, age_ms, RGBA, bytes} or null (no capture / no
+     *  frame yet). */
+    @Override
+    public long[] copyFrame(long after, long repeatMs, byte[] dest) {
         synchronized (lock) {
             long end = SystemClock.uptimeMillis() + repeatMs;
             boolean repeat = false;
@@ -168,7 +181,7 @@ public class CaptureService extends Service {
                 }
             }
             long age = repeat ? 0 : Math.max(0, Math.min(5000, (System.nanoTime() - latest.getTimestamp()) / 1_000_000));
-            return new long[]{seq, w, h, age};
+            return new long[]{seq, w, h, age, RGBA, (long) row * h};
         }
     }
 

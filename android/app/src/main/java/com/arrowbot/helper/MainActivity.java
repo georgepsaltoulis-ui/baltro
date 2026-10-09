@@ -13,7 +13,9 @@ import android.os.Handler;
 import android.os.Looper;
 import android.provider.Settings;
 import android.view.View;
+import android.text.InputType;
 import android.widget.Button;
+import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
@@ -24,8 +26,10 @@ import java.nio.charset.StandardCharsets;
 
 /**
  * The app's screen: Start / Stop the bot, what it's doing (its log), and the one-time setup
- * (Accessibility). Screen capture is asked for when the bot starts. The bot (or the Termux
- * version of it) opens this screen by itself with EXTRA_CAPTURE when it needs screen capture.
+ * (Accessibility; optionally pairing with Wireless debugging). At Start, the live picture comes
+ * from scrcpy over adb when Wireless debugging is there, else from screen capture (asked for
+ * then). The bot (or the Termux version of it) opens this screen by itself with EXTRA_CAPTURE when
+ * it needs screen capture.
  */
 public class MainActivity extends Activity {
     static final String EXTRA_CAPTURE = "capture";
@@ -33,7 +37,8 @@ public class MainActivity extends Activity {
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private TextView status, log;
-    private Button allow, deny;
+    private Button allow, deny, start;
+    private EditText code;
     private boolean finishAfterCapture, startAfterCapture;
 
     private final Runnable refresh = new Runnable() {
@@ -59,20 +64,26 @@ public class MainActivity extends Activity {
         box.addView(title);
 
         TextView about = new TextView(this);
-        about.setText("Plays Arrows on this phone: no computer, no Wi-Fi.\n\n"
+        about.setText("Plays Arrows on this phone: no computer needed.\n\n"
                 + "Once: tap \"Turn on in Accessibility\" and turn \"ArrowBot\" on. If Android says the "
                 + "setting is restricted: Settings > Apps > ArrowBot > ⋮ (top right) > Allow restricted "
                 + "settings, then try again.\n\n"
-                + "Then: \"Start bot\", and allow screen capture (\"Start now\"; pick \"Entire screen\" if "
-                + "asked). The bot opens the game and plays; the screen stays on. To stop it: \"Stop bot\" "
-                + "here or in its notification. Opening this app while it plays pauses it.");
+                + "Then: \"Start bot\". The bot opens the game and plays, and the screen goes off (black) "
+                + "while it plays: press the power button to turn it back on. To stop it: \"Stop bot\" here "
+                + "or in its notification. Opening this app while it plays pauses it.\n\n"
+                + "With Wireless debugging on (see the end of this page) the bot works like scrcpy on a "
+                + "computer. Without it (no Wi-Fi), Android asks to allow screen capture at each start: "
+                + "choose \"A single app\" > Arrows (with \"Entire screen\" the screen has to stay on).");
         about.setPadding(0, pad, 0, pad);
         box.addView(about);
 
-        Button start = button("▶  Start bot", v -> startBot());
+        start = button("▶  Start bot", v -> startBot());
         start.setTextSize(20);
         box.addView(start);
-        Button stop = button("■  Stop bot", v -> BotService.stop(this));
+        Button stop = button("■  Stop bot", v -> {
+            BotService.stop(this);
+            ScrcpyEngine.stopAll();
+        });
         stop.setTextSize(20);
         box.addView(stop);
 
@@ -98,6 +109,32 @@ public class MainActivity extends Activity {
         log.setTextIsSelectable(true);
         box.addView(log);
 
+        TextView adbTitle = new TextView(this);
+        adbTitle.setText("\nWireless debugging (optional, needs Wi-Fi)");
+        adbTitle.setTypeface(Typeface.DEFAULT_BOLD);
+        box.addView(adbTitle);
+        TextView adbHelp = new TextView(this);
+        adbHelp.setText("With it, the bot plays exactly like scrcpy on a computer: hardware video at 60 fps, "
+                + "taps through scrcpy, the screen really off. It's used by itself whenever it's on; "
+                + "without it, screen capture is used.\n"
+                + "Any Wi-Fi works (no internet needed). Once: Settings > System > Developer options > turn on "
+                + "Wireless debugging. Then tap the button below, tap \"Pair device with pairing code\" "
+                + "in Settings, pull down the notifications and type the code into ArrowBot's.");
+        box.addView(adbHelp);
+        box.addView(button("Pair with Wireless debugging", v -> Pairing.start(this)));
+        code = new EditText(this);
+        code.setHint("or type the code here (split screen)");
+        code.setInputType(InputType.TYPE_CLASS_NUMBER);
+        box.addView(code);
+        box.addView(button("Pair with this code", v -> {
+            String typed = code.getText().toString();
+            new Thread(() -> Pairing.pair(getApplicationContext(), typed), "pair").start();
+        }));
+
+        TextView more = new TextView(this);
+        more.setText("\nMore");
+        more.setTypeface(Typeface.DEFAULT_BOLD);
+        box.addView(more);
         box.addView(button("Stop screen capture", v -> stopService(new Intent(this, CaptureService.class))));
         box.addView(button("Forget allowed programs (Termux)", v -> Approvals.forgetAll(this)));
 
@@ -139,12 +176,25 @@ public class MainActivity extends Activity {
             startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
             return;
         }
-        if (!CaptureService.running()) {
-            startAfterCapture = true;       // screen capture first, then the bot
-            requestCapture();
+        if (HelperService.source() != null) {
+            launchBot();
             return;
         }
-        launchBot();
+        // adb first (Wireless debugging: scrcpy, as on a computer), else screen capture
+        start.setEnabled(false);
+        CaptureService.setBotState("looking for Wireless debugging");
+        new Thread(() -> {
+            ScrcpyEngine e = ScrcpyEngine.ensure(this, msg -> CaptureService.setBotState(msg));
+            handler.post(() -> {
+                start.setEnabled(true);
+                if (e != null || CaptureService.running()) {
+                    launchBot();
+                } else {
+                    startAfterCapture = true;       // screen capture first, then the bot
+                    requestCapture();
+                }
+            });
+        }, "start").start();
     }
 
     private void launchBot() {
@@ -155,8 +205,9 @@ public class MainActivity extends Activity {
     private void requestCapture() {
         if (CaptureService.running()) return;
         MediaProjectionManager mpm = getSystemService(MediaProjectionManager.class);
+        // "A single app" (Arrows) lets the screen be black while the bot still sees the game
         Intent i = Build.VERSION.SDK_INT >= 34
-                ? mpm.createScreenCaptureIntent(MediaProjectionConfig.createConfigForDefaultDisplay())
+                ? mpm.createScreenCaptureIntent(MediaProjectionConfig.createConfigForUserChoice())
                 : mpm.createScreenCaptureIntent();
         startActivityForResult(i, REQ_CAPTURE);
     }
@@ -200,8 +251,12 @@ public class MainActivity extends Activity {
 
     private void update() {
         boolean waiting = Approvals.pending != null;
+        String mode = HelperService.mode();
         status.setText("Accessibility:  " + (HelperService.instance != null ? "ON" : "off  <- turn it on (below)")
-                + "\nScreen capture: " + (CaptureService.running() ? "ON" : "off (asked for at Start)")
+                + "\nLive picture:   " + (mode.equals("adb") ? "scrcpy over adb" : mode.equals("capture")
+                        ? "screen capture" : "off (on at Start)")
+                + "\nWireless debug: " + (mode.equals("adb") ? ScrcpyEngine.status : Adb.status
+                        + (Pairing.result.isEmpty() ? "" : "; pairing: " + Pairing.result))
                 + "\nBot:            " + CaptureService.botState
                 + (waiting ? "\nA program (Termux?) asks to be allowed!" : ""));
         allow.setVisibility(waiting ? View.VISIBLE : View.GONE);
