@@ -65,6 +65,18 @@ then run `pkg install python` and `python ArrowBot.py`. The bot installs the res
 turning on Termux's `x11-repo`, which is where `opencv-python` lives. Without
 PyAV it looks at the screen through screenshots, which is slower than live video.
 
+### No Wi-Fi?
+
+Wireless debugging only switches on while the phone is connected to a Wi-Fi network. It doesn't need
+internet, so there are two ways round it:
+
+- **Any Wi-Fi network:** for example another phone's hotspot. Some phones also allow it with their
+  own hotspot on.
+- **A computer, once per phone restart:** plug the phone in by USB and run
+  `python ArrowBot.py --no-wifi-setup` on the computer. Then unplug it and start the bot in Termux
+  on the phone. It connects without Wi-Fi until the phone restarts. The phone asks
+  "Allow USB debugging?" once; tap Allow.
+
 ## On a computer (Windows)
 
 ```sh

@@ -58,6 +58,11 @@ WIRELESS_STEPS = """    1. Settings > About phone > tap "Build number" 7 times (
 
 WIRELESS_HELP = ("""[!] On the phone the bot works through Android's "Wireless debugging" (Android 11 or newer):
 """ + WIRELESS_STEPS + """
+    No Wi-Fi? Any Wi-Fi network will do, without internet: e.g. another phone's hotspot. Some phones
+    also allow it with their own hotspot on (Settings > Hotspot), which uses no data by itself.
+    Or, once per phone restart, with a computer instead: plug the phone in by USB and run there
+      python ArrowBot.py --no-wifi-setup
+    then unplug it and start the bot here again. That needs no Wi-Fi at all.
     Waiting for it... (Ctrl+C to stop)""")
 
 ADDRESS_HELP = ("""[!] On the phone the bot works through Android's "Wireless debugging" (Android 11 or newer):
@@ -177,8 +182,9 @@ def _open_ports(host, batch=500, wait=0.5):
     return sorted(found, key=lambda p: (p != 5555, p))
 
 
-def _is_adbd(host, port):
-    """The port answers an adb CONNECT the way the phone's adbd does (other apps listen too)."""
+def _adbd_kind(host, port):
+    """How the port answers an adb CONNECT: "tls" = Wireless debugging (needs pairing), "tcp" = a
+    port opened with `adb tcpip` from a computer (asks "Allow?" on the phone), None = not adbd."""
     payload = b"host::\0"
     msg = struct.pack("<6I", A_CNXN, 0x01000001, 256 * 1024, len(payload), sum(payload),
                       A_CNXN ^ 0xFFFFFFFF) + payload
@@ -188,15 +194,27 @@ def _is_adbd(host, port):
             s.sendall(msg)
             head = s.recv(24)
     except OSError:
-        return False
-    return len(head) >= 4 and struct.unpack("<I", head[:4])[0] in (A_STLS, A_AUTH, A_CNXN)
+        return None
+    cmd = struct.unpack("<I", head[:4])[0] if len(head) >= 4 else None
+    return "tls" if cmd == A_STLS else "tcp" if cmd in (A_AUTH, A_CNXN) else None
+
+
+def _is_adbd(host, port):
+    """The port answers an adb CONNECT the way the phone's adbd does (other apps listen too)."""
+    return _adbd_kind(host, port) is not None
 
 
 def _ready(adb, serial, wait=8.0):
-    end = time.time() + wait
+    """Connected and allowed. A port opened with `adb tcpip` (from a computer) asks on the phone's
+    screen first, like a new computer on USB: then wait up to a minute for "Allow"."""
+    end, asked = time.time() + wait, False
     while time.time() < end:
-        if _adb(adb, "-s", serial, "get-state", timeout=5) == "device":
+        state = _adb(adb, "-s", serial, "get-state", timeout=5)
+        if state == "device":
             return True
+        if "unauthorized" in state and not asked:
+            print('[!] The phone asks "Allow USB debugging?": tick "Always allow" and tap Allow.')
+            end, asked = time.time() + 60, True
         time.sleep(0.5)
     return False
 
@@ -253,14 +271,17 @@ def try_connect(adb):
         if host is None:
             return None, "address"
     hint = _port_hint.pop(host, None)
-    ports = [hint] if hint and _is_adbd(host, hint) else [p for p in _open_ports(host) if _is_adbd(host, p)]
+    candidates = [hint] if hint and _is_adbd(host, hint) else _open_ports(host)
+    ports = [(p, k) for p, k in ((p, _adbd_kind(host, p)) for p in candidates) if k]
+    ports.sort(key=lambda pk: pk[1] != "tls")   # Wireless debugging first: it never asks "Allow?"
     unpaired = False
-    for port in ports:
+    for port, kind in ports:
         serial = f"{host}:{port}"
         out = _adb(adb, "connect", serial, timeout=20)
-        if "connected to" in out and _ready(adb, serial):    # also "already connected to"
+        # (also "already connected to"; a "tcp" port may first say it failed: it waits for "Allow")
+        if ("connected to" in out or kind == "tcp") and _ready(adb, serial):
             return serial, None
-        unpaired = True                 # it's adbd, but it won't let this adb in
+        unpaired = unpaired or kind == "tls"   # Wireless debugging, but it won't let this adb in
         _adb(adb, "disconnect", serial, timeout=5)
     return None, ("pair" if unpaired else "off")
 

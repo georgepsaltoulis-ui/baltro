@@ -8,6 +8,8 @@ the phone itself with no computer at all (see ON THE PHONE below).
     python ArrowBot.py --no-show   start without the window
     --allow-helper                 allow the uiautomator2 helper on the phone without asking
     --on-phone                     run on the phone itself (found by itself in Android's Terminal app)
+    --no-wifi-setup                on the computer, phone on USB: lets the bot on the phone connect
+                                   without Wi-Fi until the phone restarts (adb tcpip 5555)
 
 The first time, it asks before putting uiautomator2's small helper on the phone (needed to control
 it). If adb isn't set up, it shows where to get it; if the phone isn't found (USB debugging off,
@@ -257,6 +259,24 @@ def _termux_setup():
         subprocess.run(["pkg", "install", "-y", "android-tools"])
 
 
+def _no_wifi_setup():
+    """Computer, phone on USB: `adb tcpip 5555`. The phone's adb then also listens on port 5555 -
+    with or without Wi-Fi - until it restarts, so the bot running on the phone itself (Termux) can
+    connect to it at 127.0.0.1:5555. No Wireless debugging needed."""
+    adb = _check_adb()
+    phone = _wait_for_phone(adb)[0]
+    out = subprocess.run([adb, "-s", phone, "tcpip", "5555"], capture_output=True, text=True, timeout=60)
+    text = (out.stdout + out.stderr).strip()
+    if out.returncode != 0 or "error" in text.lower():
+        print(f"[-] That didn't work: {text}")
+        sys.exit(1)
+    print("""[+] Done: until it restarts, the phone lets the bot on it connect without Wi-Fi.
+    1. Unplug the phone.
+    2. On the phone, in Termux:  python ArrowBot.py
+       The first time it asks "Allow USB debugging?" for Termux: tick "Always allow" and tap Allow.
+    After the phone restarts, plug it in here and run this again.""")
+
+
 def _check_adb(help_text=ADB_HELP):
     """adb must run (else: where to get it)."""
     exe = shutil.which("adb")
@@ -348,13 +368,14 @@ def _helper_permission(adb, devices, allowed_by_flag):
 
 def main():
     args = sys.argv[1:]
-    if any(a not in ("--show", "--no-show", "--allow-helper", "--on-phone") for a in args):
+    if any(a not in ("--show", "--no-show", "--allow-helper", "--on-phone", "--no-wifi-setup") for a in args):
         print(__doc__)
         return
     allow = "--allow-helper" in args
+    no_wifi_setup = "--no-wifi-setup" in args
     if "--on-phone" in args:
         os.environ["ARROWBOT_ON_PHONE"] = "1"      # (seen by onphone.py here and in the bot)
-    args = [a for a in args if a not in ("--allow-helper", "--on-phone")]
+    args = [a for a in args if a not in ("--allow-helper", "--on-phone", "--no-wifi-setup")]
     sys.path.insert(0, DATA)
     unpack()
     import onphone
@@ -379,6 +400,9 @@ def main():
         scrcpy_dir = os.path.join(DATA, "Scrcpy")
         if shutil.which("adb") is None and os.path.isdir(scrcpy_dir):
             os.environ["PATH"] = scrcpy_dir + os.pathsep + os.environ.get("PATH", "")
+        if no_wifi_setup:
+            _no_wifi_setup()
+            return
         _need(["numpy", "cv2", "uiautomator2", "av"])
         adb = _check_adb()
         devices = _wait_for_phone(adb)
