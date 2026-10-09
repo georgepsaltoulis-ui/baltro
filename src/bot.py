@@ -127,9 +127,8 @@ SCREENSHOT_TIMEOUT = 5   # seconds before a hung screenshot is abandoned
 CAPTURE_THREADS = 2      # screenshots taken in parallel (more fresh frames per second)
 USE_SCRCPY = True        # live video + taps through scrcpy (./Scrcpy); falls back to screenshots
 SCRCPY_MAX_DIFF = 10     # scrcpy frame must look like a real screenshot (median abs diff) to be used
-SCRCPY_FPS = 30 if ON_PHONE else 60  # live video frame rate (60 = a frame every ~17ms: changes
-                         # seen sooner; 30 saves some battery/USB load - and on the phone itself the
-                         # decoding shares the CPU with the game)
+SCRCPY_FPS = 60          # live video frame rate (60 = a frame every ~17ms: changes seen sooner;
+                         # 30 saves some battery/USB load)
 SCRCPY_BITRATE = 8_000_000  # video quality; lower = less battery/USB load
 SCREEN_OFF = False       # True: turn the phone's screen off while the bot plays (saves battery; the
                          # game keeps running). False: the screen stays on the whole time (its
