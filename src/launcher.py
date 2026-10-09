@@ -1,0 +1,264 @@
+#!/usr/bin/env python3
+"""
+Arrows bot - plays the Android game "Arrows" (com.arrow.out) on a phone connected by USB.
+
+    python ArrowBot.py             start (asks whether to show the phone screen on this PC)
+    python ArrowBot.py --show      start and show the phone screen in a window (view only)
+    python ArrowBot.py --no-show   start without the window
+    --allow-helper                 allow the uiautomator2 helper on the phone without asking
+
+The first time, it asks before putting uiautomator2's small helper on the phone (needed to control
+it). If adb isn't set up, it shows where to get it; if the phone isn't found (USB debugging off,
+computer not allowed yet, ...), it says what to do and waits until the phone is there.
+Esc (or Ctrl+C) stops it. The phone's screen is turned back on and its normal screen timeout restored.
+
+Everything the bot needs is inside this file: on the first run it's unpacked into ArrowBot_files/
+next to this file (again only when this file changes). Needs Python 3 with:
+    pip install opencv-python numpy uiautomator2 av
+(uiautomator2 is installed automatically if it's missing). adb comes bundled.
+"""
+import base64, io, os, runpy, shutil, subprocess, sys, zipfile
+
+BUILD = "83eadb560a052dd9"
+HERE = os.path.dirname(os.path.abspath(__file__))
+DATA = os.path.join(HERE, "ArrowBot_files")
+
+ADB_HELP = """[-] adb (Android Debug Bridge) wasn't found or doesn't work. The bot needs it to talk to the phone.
+    1. Download Google's platform-tools, unzip them, add that folder to your PATH:
+         https://developer.android.com/tools/releases/platform-tools
+       (what adb is and how it works: https://developer.android.com/tools/adb)
+    2. On the phone, turn on Developer options and USB debugging:
+         https://developer.android.com/studio/debug/dev-options
+    3. Plug the phone in by USB, allow the computer when the phone asks, and run this again."""
+
+PHONE_HELP = {
+    "none": """[!] No phone found. adb works, so the usual reason is that USB debugging is off on the phone:
+    1. Settings > About phone > tap "Build number" 7 times (this turns on Developer options).
+    2. Settings > System > Developer options > turn on "USB debugging".
+       (menu names vary by phone; step by step: https://developer.android.com/studio/debug/dev-options)
+    3. Plug the phone in with a USB cable that carries data (some only charge). If the phone asks
+       what the USB connection is for, choose "File transfer".
+    4. Windows: still not found? The phone may need its USB driver:
+       https://developer.android.com/studio/run/oem-usb
+    Waiting for the phone... (Esc to stop)""",
+    "unauthorized": """[!] The phone is connected but hasn't allowed this computer yet. Unlock the phone: it asks
+    "Allow USB debugging?" - tick "Always allow from this computer" and tap Allow.
+    No question on the phone? Developer options > "Revoke USB debugging authorizations", then unplug
+    the cable and plug it back in.
+    Waiting... (Esc to stop)""",
+    "offline": """[!] The phone shows up as "offline": unplug the cable and plug it back in (or restart the phone).
+    Waiting... (Esc to stop)""",
+    "no permissions": """[!] adb isn't allowed to use the phone's USB connection (Linux: udev rules):
+       https://developer.android.com/studio/run/device#setting-up
+    Waiting... (Esc to stop)""",
+    "several": """[!] More than one phone / emulator is connected: unplug the others so only the game phone is left.
+    Waiting... (Esc to stop)""",
+}
+
+HELPER_ASK = """[?] The bot controls the phone with uiautomator2, which needs a small helper ON THE PHONE:
+      - a file, /data/local/tmp/u2.jar, that runs while the bot plays (uiautomator2 3.x), or
+      - an app called "ATX" (com.github.uiautomator) with older uiautomator2 versions.
+    It's put there the first time the bot connects. You can remove it any time:
+      adb shell rm /data/local/tmp/u2.jar        (or uninstall the ATX app on the phone)
+    Allow the bot to put it on your phone? (y/N): """
+
+
+def _payload():
+    with open(os.path.abspath(__file__), "rb") as f:
+        text = f.read()
+    a = text.index(b"\n#PAYLOAD-BEGIN") + len(b"\n#PAYLOAD-BEGIN")
+    b = text.index(b"\n#PAYLOAD-END")
+    lines = text[a:b].split(b"\n")
+    return base64.b64decode(b"".join(l.strip()[1:] for l in lines if l.strip()))
+
+
+def unpack():
+    stamp = os.path.join(DATA, ".build")
+    try:
+        with open(stamp) as f:
+            if f.read().strip() == BUILD:
+                return
+    except OSError:
+        pass
+    print("[*] First start: unpacking the bot's files ...")
+    os.makedirs(DATA, exist_ok=True)
+    with zipfile.ZipFile(io.BytesIO(_payload())) as z:
+        z.extractall(DATA)
+    with open(stamp, "w") as f:
+        f.write(BUILD)
+
+
+def _keys_ok():
+    return os.name == "nt" and sys.stdin is not None and sys.stdin.isatty()
+
+
+def _esc_pressed():
+    if not _keys_ok():
+        return False
+    import msvcrt
+    while msvcrt.kbhit():
+        if msvcrt.getwch() == "\x1b":
+            return True
+    return False
+
+
+def _ask_yes_no(prompt):
+    """One key: y = yes, n / Enter = no, Esc = quit."""
+    if not _keys_ok():
+        try:
+            return input(prompt).strip().lower().startswith("y")
+        except EOFError:
+            return False
+    import msvcrt
+    print(prompt, end="", flush=True)
+    while True:
+        ch = msvcrt.getwch()
+        if ch in ("\x00", "\xe0"):
+            msvcrt.getwch()
+        elif ch == "\x1b":
+            print("\n[*] Stopped.")
+            sys.exit(0)
+        elif ch in "yY":
+            print("y")
+            return True
+        elif ch in "nN\r\n":
+            print("n")
+            return False
+
+
+def _importable(m):
+    try:
+        __import__(m)
+        return True
+    except ImportError:
+        return False
+
+
+def _need(mods):
+    if "uiautomator2" in mods and not _importable("uiautomator2"):
+        # (its helper app on the phone is installed by uiautomator2 itself on the first connect)
+        print("[*] uiautomator2 isn't installed: installing it now (python -m pip install uiautomator2) ...")
+        subprocess.run([sys.executable, "-m", "pip", "install", "uiautomator2"])
+        import importlib
+        importlib.invalidate_caches()
+    missing = [m for m in mods if not _importable(m)]
+    if missing:
+        pip = {"cv2": "opencv-python", "av": "av", "uiautomator2": "uiautomator2", "numpy": "numpy"}
+        print("[-] Missing Python packages: " + ", ".join(missing))
+        print("    Install them with:  pip install " + " ".join(pip[m] for m in missing))
+        sys.exit(1)
+
+
+def _check_adb():
+    """adb must run (else: where to get it)."""
+    exe = shutil.which("adb")
+    try:
+        ok = exe is not None and subprocess.run([exe, "version"], capture_output=True,
+                                                timeout=20).returncode == 0
+    except Exception:
+        ok = False
+    if not ok:
+        print(ADB_HELP)
+        sys.exit(1)
+    return exe
+
+
+def _phones(adb):
+    """[(serial, state)] from `adb devices` (state: device / unauthorized / offline / ...)."""
+    try:
+        out = subprocess.run([adb, "devices"], capture_output=True, text=True, timeout=20).stdout
+    except Exception:
+        return []
+    found = []
+    for line in out.splitlines()[1:]:
+        if "\t" in line:
+            serial, state = line.split("\t", 1)
+            found.append((serial.strip(), state.strip()))
+    return found
+
+
+def _wait_for_phone(adb):
+    """Wait until exactly one phone is connected and allows this computer, with help that fits
+    what adb sees (nothing at all usually means USB debugging is off). Returns its serial."""
+    import time
+    shown = None
+    try:
+        while True:
+            phones = _phones(adb)
+            ready = [s for s, st in phones if st == "device"]
+            if len(ready) == 1:
+                if shown:
+                    print("[+] Phone connected.")
+                return ready
+            if len(ready) > 1:
+                key = "several"
+            elif phones:
+                states = {st for _, st in phones}
+                key = next((k for k in ("unauthorized", "offline", "no permissions")
+                            if any(k in st for st in states)), "none")
+            else:
+                key = "none"
+            if key != shown:
+                print(PHONE_HELP[key])
+                shown = key
+            for _ in range(20):                     # check again in 2s; Esc quits meanwhile
+                if _esc_pressed():
+                    print("[*] Stopped.")
+                    sys.exit(0)
+                time.sleep(0.1)
+    except KeyboardInterrupt:
+        print("\n[*] Stopped.")
+        sys.exit(0)
+
+
+def _helper_on_phone(adb, serial):
+    """The uiautomator2 helper is already there (then nothing new gets put on the phone)."""
+    def sh(*cmd):
+        try:
+            return subprocess.run([adb, "-s", serial, "shell", *cmd], capture_output=True, text=True,
+                                  timeout=20).stdout
+        except Exception:
+            return ""
+    return ("/data/local/tmp/u2.jar" in sh("ls", "/data/local/tmp/u2.jar")
+            or "com.github.uiautomator" in sh("pm", "list", "packages", "com.github.uiautomator"))
+
+
+def _helper_permission(adb, devices, allowed_by_flag):
+    """Ask once before uiautomator2 puts its helper on the phone; remembered in ArrowBot_files/."""
+    flag = os.path.join(DATA, ".helper_allowed")
+    if os.path.exists(flag):
+        return
+    if allowed_by_flag or (len(devices) == 1 and _helper_on_phone(adb, devices[0])):
+        open(flag, "w").close()
+        return
+    if not _ask_yes_no(HELPER_ASK):
+        print("[-] Not allowed, so the bot won't start (it can't control the phone without it).\n"
+              "    Nothing was put on your phone. To allow it later: python ArrowBot.py --allow-helper")
+        sys.exit(1)
+    open(flag, "w").close()
+
+
+def main():
+    args = sys.argv[1:]
+    if any(a not in ("--show", "--no-show", "--allow-helper") for a in args):
+        print(__doc__)
+        return
+    allow = "--allow-helper" in args
+    args = [a for a in args if a != "--allow-helper"]
+    unpack()
+    scrcpy_dir = os.path.join(DATA, "Scrcpy")
+    if shutil.which("adb") is None and os.path.isdir(scrcpy_dir):
+        os.environ["PATH"] = scrcpy_dir + os.pathsep + os.environ.get("PATH", "")
+    _need(["numpy", "cv2", "uiautomator2", "av"])
+    adb = _check_adb()
+    devices = _wait_for_phone(adb)
+    _helper_permission(adb, devices, allow)
+    bot = os.path.join(DATA, "bot.py")
+    sys.argv = [bot] + args
+    sys.path.insert(0, DATA)
+    runpy.run_path(bot, run_name="__main__")
+
+
+if __name__ == "__main__":
+    main()
+
