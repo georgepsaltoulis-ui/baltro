@@ -26,11 +26,13 @@ You need Android 11 or newer and Android's built-in **Terminal** app:
 Then, in the Terminal app:
 
 ```sh
-sudo apt update && sudo apt install -y adb python3-opencv python3-numpy python3-av \
-    python3-pip python3-lxml python3-pil python3-requests
-pip install --user --break-system-packages uiautomator2
+sudo apt update && sudo apt install -y --no-install-recommends adb python3-pip
 cp /mnt/shared/ArrowBot.py ~ && python3 ArrowBot.py
 ```
+
+The first start installs the Python packages the bot needs with pip: `opencv-python-headless`,
+`numpy`, `av` and `uiautomator2`, about 100 MB in total. Don't install Debian's own `python3-opencv`:
+it pulls in hundreds of MB of extras and takes a very long time.
 
 The bot reaches the phone through its own **Wireless debugging** (Developer options; it needs
 Wi-Fi but not internet):

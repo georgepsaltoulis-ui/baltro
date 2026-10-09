@@ -22,10 +22,10 @@ next to this file (again only when this file changes). Needs Python 3 with:
 
 ON THE PHONE (no computer) in Android's Terminal app: Settings > System > Developer options >
 "Linux development environment" on, open the Terminal app, put ArrowBot.py in Downloads, then:
-    sudo apt update && sudo apt install -y adb python3-opencv python3-numpy python3-av \
-        python3-pip python3-lxml python3-pil python3-requests
-    pip install --user --break-system-packages uiautomator2
+    sudo apt update && sudo apt install -y --no-install-recommends adb python3-pip
     cp /mnt/shared/ArrowBot.py ~ && python3 ArrowBot.py
+(the first start installs the Python packages it needs with pip: opencv-python-headless, numpy,
+av, uiautomator2 - about 100 MB).
 The bot works through the phone's own "Wireless debugging" (Developer options, Android 11+; needs
 Wi-Fi, not internet). The first time it shows how to turn that on and asks for the address and
 pairing code it shows; after that it connects by itself and opens the game. To stop it, tap the
@@ -154,27 +154,36 @@ def _importable(m):
         return False
 
 
-PHONE_PKGS = {   # prebuilt packages (pip would have to compile them)
+PIP_NAMES = {"cv2": "opencv-python", "av": "av", "uiautomator2": "uiautomator2", "numpy": "numpy"}
+PHONE_PKGS = {   # Termux: prebuilt packages (pip would have to compile them)
     "termux": {"numpy": "pkg install python-numpy",
                "cv2": "pkg install opencv-python",
                "uiautomator2": "pkg install python-lxml python-pillow && pip install uiautomator2",
                "av": "pkg install ffmpeg build-essential && pip install av"},
-    "debian": {"numpy": "sudo apt install python3-numpy",       # Android's Terminal app
-               "cv2": "sudo apt install python3-opencv",
-               "uiautomator2": "sudo apt install python3-pip python3-lxml python3-pil python3-requests\n"
-                               "      pip install --user --break-system-packages uiautomator2",
-               "av": "sudo apt install python3-av"},
 }
+# Android's Terminal app (Debian): pip has ready-made ARM builds of all of them (~100 MB together);
+# Debian's own python3-opencv drags in hundreds of MB more (GDAL, VTK, Qt) and takes ages to install.
+# Debian's Python only takes pip packages per user, with --break-system-packages ("externally managed").
+DEBIAN_PIP = ["--user", "--break-system-packages", "--no-warn-script-location"]
+DEBIAN_NAMES = {"cv2": "opencv-python-headless"}
 
 
 def _need(mods, phone=None):
-    """phone: None on a computer, else "termux" / "debian" (which install hints fit)."""
-    if "uiautomator2" in mods and not _importable("uiautomator2"):
-        # (its helper app on the phone is installed by uiautomator2 itself on the first connect)
-        # Debian's Python only takes pip packages per user, with this flag ("externally managed")
-        extra = ["--user", "--break-system-packages"] if phone == "debian" else []
-        cmd = [sys.executable, "-m", "pip", "install", *extra, "uiautomator2"]
-        print(f"[*] uiautomator2 isn't installed: installing it now ({' '.join(['python'] + cmd[1:])}) ...")
+    """phone: None on a computer, else "termux" / "debian" (what gets installed, which hints fit)."""
+    if phone == "debian":
+        auto = [m for m in mods + ["av"] if not _importable(m)]      # everything (av for live video)
+    else:
+        auto = [m for m in ["uiautomator2"] if m in mods and not _importable(m)]
+    if auto:
+        # (uiautomator2's helper app on the phone is installed by uiautomator2 itself on the first connect)
+        extra = DEBIAN_PIP if phone == "debian" else []
+        names = [(DEBIAN_NAMES if phone == "debian" else {}).get(m, PIP_NAMES[m]) for m in auto]
+        if not _importable("pip"):
+            print("[-] pip isn't installed. Install it with:\n"
+                  "      sudo apt install -y --no-install-recommends python3-pip\n    then run this again.")
+            sys.exit(1)
+        cmd = [sys.executable, "-m", "pip", "install", *extra, *names]
+        print(f"[*] Installing what the bot needs ({' '.join(['python'] + cmd[1:])}) ...")
         subprocess.run(cmd)
         import importlib, site
         importlib.invalidate_caches()
@@ -183,17 +192,20 @@ def _need(mods, phone=None):
     missing = [m for m in mods if not _importable(m)]
     if missing:
         print("[-] Missing Python packages: " + ", ".join(missing))
-        if phone:
+        if phone == "termux":
             print("    Install them with:")
             for m in missing:
                 print("      " + PHONE_PKGS[phone][m])
+        elif phone == "debian":
+            print("    Install them with:  pip install " + " ".join(DEBIAN_PIP)
+                  + " " + " ".join(DEBIAN_NAMES.get(m, PIP_NAMES[m]) for m in missing))
         else:
-            pip = {"cv2": "opencv-python", "av": "av", "uiautomator2": "uiautomator2", "numpy": "numpy"}
-            print("    Install them with:  pip install " + " ".join(pip[m] for m in missing))
+            print("    Install them with:  pip install " + " ".join(PIP_NAMES[m] for m in missing))
         sys.exit(1)
     if phone and not _importable("av"):
         print("[*] PyAV (av) isn't installed, so the bot looks at the screen through screenshots (slower\n"
-              "    than live video). For live video: " + PHONE_PKGS[phone]["av"])
+              "    than live video). For live video: " + (PHONE_PKGS["termux"]["av"] if phone == "termux" else
+                                                         "pip install " + " ".join(DEBIAN_PIP) + " av"))
 
 
 def _check_adb(help_text=ADB_HELP):

@@ -41,7 +41,7 @@ if IN_TERMUX:
     then run this again."""
 else:
     ADB_HELP = """[-] adb wasn't found. Install it in the Terminal app:
-      sudo apt update && sudo apt install adb
+      sudo apt update && sudo apt install -y --no-install-recommends adb
     then run this again."""
 
 ADB_TOO_OLD = """[-] This adb ({version}) is too old to pair with Wireless debugging (that needs adb 30 or newer).
