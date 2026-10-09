@@ -7,35 +7,37 @@ the phone itself with no computer at all (see ON THE PHONE below).
     python ArrowBot.py --show      start and show the phone screen in a window (view only)
     python ArrowBot.py --no-show   start without the window
     --allow-helper                 allow the uiautomator2 helper on the phone without asking
+    --on-phone                     run on the phone itself (found by itself in Android's Terminal app)
 
 The first time, it asks before putting uiautomator2's small helper on the phone (needed to control
 it). If adb isn't set up, it shows where to get it; if the phone isn't found (USB debugging off,
 computer not allowed yet, ...), it says what to do and waits until the phone is there.
-The phone's screen stays on while the bot plays. Esc (or Ctrl+C) stops it; the phone's normal screen
-timeout is then restored.
+The phone's screen stays on while the bot plays. To stop it, tap the "Arrow bot is playing"
+notification on the phone (or Esc / q / Ctrl+C here); the phone's normal screen timeout is then restored.
 
 Everything the bot needs is inside this file: on the first run it's unpacked into ArrowBot_files/
 next to this file (again only when this file changes). Needs Python 3 with:
     pip install opencv-python numpy uiautomator2 av
 (uiautomator2 is installed automatically if it's missing). adb comes bundled.
 
-ON THE PHONE (no computer, Android 11 or newer): install Termux, then in Termux:
-    pkg install python android-tools python-numpy opencv-python python-pillow python-lxml
-    pip install uiautomator2
-    termux-setup-storage                      (once: lets Termux see your Downloads)
-    cp ~/storage/downloads/ArrowBot.py ~ && python ArrowBot.py
-Optional, for live video instead of slower screenshots:
-    pkg install ffmpeg build-essential && pip install av
-The bot works through the phone's own "Wireless debugging" (Developer options; needs Wi-Fi, not
-internet). The first time it shows how to turn that on and asks for the pairing code; after that it
-connects by itself and opens the game. Open Termux to pause the bot; Ctrl+C there stops it.
+ON THE PHONE (no computer) in Android's Terminal app: Settings > System > Developer options >
+"Linux development environment" on, open the Terminal app, put ArrowBot.py in Downloads, then:
+    sudo apt update && sudo apt install -y adb python3-opencv python3-numpy python3-av \
+        python3-pip python3-lxml python3-pil python3-requests
+    pip install --user --break-system-packages uiautomator2
+    cp /mnt/shared/ArrowBot.py ~ && python3 ArrowBot.py
+The bot works through the phone's own "Wireless debugging" (Developer options, Android 11+; needs
+Wi-Fi, not internet). The first time it shows how to turn that on and asks for the address and
+pairing code it shows; after that it connects by itself and opens the game. To stop it, tap the
+"Arrow bot is playing" notification. Opening the Terminal app pauses it (ESC there stops it).
+(Termux works too: pkg install python android-tools python-numpy opencv-python python-pillow
+python-lxml, pip install uiautomator2.)
 """
 import base64, io, os, runpy, shutil, subprocess, sys, zipfile
 
 BUILD = "83eadb560a052dd9"
 HERE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.path.join(HERE, "ArrowBot_files")
-ON_PHONE = hasattr(sys, "getandroidapilevel") or "ANDROID_ROOT" in os.environ   # in Termux, no computer
 WINDOWS_ONLY = (".exe", ".dll")   # scrcpy's PC window and adb for Windows: not unpacked on the phone
 
 ADB_HELP = """[-] adb (Android Debug Bridge) wasn't found or doesn't work. The bot needs it to talk to the phone.
@@ -98,7 +100,10 @@ def unpack():
     print("[*] First start: unpacking the bot's files ...")
     os.makedirs(DATA, exist_ok=True)
     with zipfile.ZipFile(io.BytesIO(_payload())) as z:
-        z.extractall(DATA, [n for n in z.namelist() if not (ON_PHONE and n.lower().endswith(WINDOWS_ONLY))])
+        z.extract("onphone.py", DATA)          # first: it knows whether this is the phone itself
+        import onphone
+        skip = WINDOWS_ONLY if onphone.ON_PHONE else ()
+        z.extractall(DATA, [n for n in z.namelist() if not n.lower().endswith(skip)])
     with open(stamp, "w") as f:
         f.write(BUILD)
 
@@ -149,34 +154,46 @@ def _importable(m):
         return False
 
 
-PHONE_PKGS = {   # Termux has these prebuilt (pip would have to compile them)
-    "numpy": "pkg install python-numpy",
-    "cv2": "pkg install opencv-python",
-    "uiautomator2": "pkg install python-lxml python-pillow && pip install uiautomator2",
+PHONE_PKGS = {   # prebuilt packages (pip would have to compile them)
+    "termux": {"numpy": "pkg install python-numpy",
+               "cv2": "pkg install opencv-python",
+               "uiautomator2": "pkg install python-lxml python-pillow && pip install uiautomator2",
+               "av": "pkg install ffmpeg build-essential && pip install av"},
+    "debian": {"numpy": "sudo apt install python3-numpy",       # Android's Terminal app
+               "cv2": "sudo apt install python3-opencv",
+               "uiautomator2": "sudo apt install python3-pip python3-lxml python3-pil python3-requests\n"
+                               "      pip install --user --break-system-packages uiautomator2",
+               "av": "sudo apt install python3-av"},
 }
 
 
-def _need(mods):
+def _need(mods, phone=None):
+    """phone: None on a computer, else "termux" / "debian" (which install hints fit)."""
     if "uiautomator2" in mods and not _importable("uiautomator2"):
         # (its helper app on the phone is installed by uiautomator2 itself on the first connect)
-        print("[*] uiautomator2 isn't installed: installing it now (python -m pip install uiautomator2) ...")
-        subprocess.run([sys.executable, "-m", "pip", "install", "uiautomator2"])
-        import importlib
+        # Debian's Python only takes pip packages per user, with this flag ("externally managed")
+        extra = ["--user", "--break-system-packages"] if phone == "debian" else []
+        cmd = [sys.executable, "-m", "pip", "install", *extra, "uiautomator2"]
+        print(f"[*] uiautomator2 isn't installed: installing it now ({' '.join(['python'] + cmd[1:])}) ...")
+        subprocess.run(cmd)
+        import importlib, site
         importlib.invalidate_caches()
+        if extra and site.getusersitepackages() not in sys.path:
+            sys.path.append(site.getusersitepackages())     # (a first --user install: not on the path yet)
     missing = [m for m in mods if not _importable(m)]
     if missing:
         print("[-] Missing Python packages: " + ", ".join(missing))
-        if ON_PHONE:
-            print("    Install them in Termux with:")
+        if phone:
+            print("    Install them with:")
             for m in missing:
-                print("      " + PHONE_PKGS[m])
+                print("      " + PHONE_PKGS[phone][m])
         else:
             pip = {"cv2": "opencv-python", "av": "av", "uiautomator2": "uiautomator2", "numpy": "numpy"}
             print("    Install them with:  pip install " + " ".join(pip[m] for m in missing))
         sys.exit(1)
-    if ON_PHONE and not _importable("av"):
+    if phone and not _importable("av"):
         print("[*] PyAV (av) isn't installed, so the bot looks at the screen through screenshots (slower\n"
-              "    than live video). For live video: pkg install ffmpeg build-essential && pip install av")
+              "    than live video). For live video: " + PHONE_PKGS[phone]["av"])
 
 
 def _check_adb(help_text=ADB_HELP):
@@ -270,18 +287,24 @@ def _helper_permission(adb, devices, allowed_by_flag):
 
 def main():
     args = sys.argv[1:]
-    if any(a not in ("--show", "--no-show", "--allow-helper") for a in args):
+    if any(a not in ("--show", "--no-show", "--allow-helper", "--on-phone") for a in args):
         print(__doc__)
         return
     allow = "--allow-helper" in args
-    args = [a for a in args if a != "--allow-helper"]
-    unpack()
+    if "--on-phone" in args:
+        os.environ["ARROWBOT_ON_PHONE"] = "1"      # (seen by onphone.py here and in the bot)
+    args = [a for a in args if a not in ("--allow-helper", "--on-phone")]
     sys.path.insert(0, DATA)
-    if ON_PHONE:
-        # no computer: Termux's adb connects to the phone's own wireless debugging (onphone.py)
-        import onphone
-        _need(["numpy", "cv2", "uiautomator2"])     # (av optional: screenshots without it)
+    unpack()
+    import onphone
+    if onphone.ON_PHONE:
+        # no computer: adb here connects to the phone's own wireless debugging (onphone.py)
+        _need(["numpy", "cv2", "uiautomator2"], "termux" if onphone.IN_TERMUX else "debian")
         adb = _check_adb(onphone.ADB_HELP)
+        old = onphone.adb_too_old(adb)
+        if old:
+            print(onphone.ADB_TOO_OLD.format(version=old))
+            sys.exit(1)
         try:
             devices = [onphone.wait_until_connected(adb)]
         except KeyboardInterrupt:

@@ -7,37 +7,55 @@ or on the phone itself with no computer.
 The phone's screen stays on while the bot plays. When the bot stops, the phone's normal screen
 timeout is put back.
 
+## Stopping it
+
+- **Stop button:** while the bot plays, the phone shows an *Arrow bot is playing* notification. Pull
+  down the notification shade and tap it (or swipe it away) to stop the bot, even with the game open.
+- **In the terminal:** open the terminal the bot runs in. The bot pauses while it's open. Tap **ESC**
+  in the key row above the keyboard (or press `q`) to stop it. Go back to the game to let it carry on.
+- **Ctrl+C** works too.
+
 ## On the phone (no computer)
 
-Needs Android 11 or newer and [Termux](https://termux.dev). In Termux:
+You need Android 11 or newer and Android's built-in **Terminal** app:
+
+1. Settings > System > Developer options > turn on **Linux development environment**.
+2. Open the Terminal app and let it install.
+3. Put `ArrowBot.py` in your phone's **Download** folder.
+
+Then, in the Terminal app:
 
 ```sh
-pkg install python android-tools python-numpy opencv-python python-pillow python-lxml
-pip install uiautomator2
-termux-setup-storage                          # once: lets Termux see your Downloads
-cp ~/storage/downloads/ArrowBot.py ~ && python ArrowBot.py
+sudo apt update && sudo apt install -y adb python3-opencv python3-numpy python3-av \
+    python3-pip python3-lxml python3-pil python3-requests
+pip install --user --break-system-packages uiautomator2
+cp /mnt/shared/ArrowBot.py ~ && python3 ArrowBot.py
 ```
-
-Optional: live video is faster than screenshots. To get it, run
-`pkg install ffmpeg build-essential && pip install av`.
 
 The bot reaches the phone through its own **Wireless debugging** (Developer options; it needs
 Wi-Fi but not internet):
 
-1. The first time, the bot explains how to turn Wireless debugging on.
-2. It asks for the pairing port and code. Put Settings and Termux side by side (split screen) and
-   open *Wireless debugging > Pair device with pairing code*.
-3. After that it finds the phone by itself every time and opens the game.
+1. The first time, the bot explains how to turn Wireless debugging on. It asks you to type the
+   *IP address & Port* that Wireless debugging shows.
+2. It then asks you to pair once: tap *Pair device with pairing code* and type the address and
+   code shown there. Split screen (Settings next to the Terminal) makes this easy.
+3. After that it finds the phone by itself and opens the game. If it can't (for example on another
+   Wi-Fi network), it asks for the address again.
 
-To pause the bot, switch to Termux. Press Ctrl+C there to stop it. Switch back to the game to let it
-carry on.
+Tips:
 
-Tips if Android stops Termux in the background:
+- **The bot stops when you switch apps:** the Terminal app may have recreated its window. Run the
+  bot inside `tmux` (`sudo apt install tmux`, then `tmux`, then start the bot).
+- **The phone's Debian is version 12:** its `adb` is too old to pair. The bot tells you how to get a
+  newer one.
+- **`/mnt/shared` is empty:** give the Terminal app access to your files in Android's settings.
 
-- Set Termux's battery use to *Unrestricted*.
-- On Android 14 and newer, turn on *Disable child process restrictions* in Developer options.
-- On Android 12L and 13, run `adb shell settings put global settings_enable_monitor_phantom_procs false`
-  once in Termux.
+Termux works as well. In Termux, run:
+
+```sh
+pkg install python android-tools python-numpy opencv-python python-pillow python-lxml
+pip install uiautomator2
+```
 
 ## On a computer (Windows)
 

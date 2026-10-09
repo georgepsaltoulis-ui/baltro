@@ -1,49 +1,83 @@
 """
-Running the bot on the phone itself (in Termux), no computer needed.
+Running the bot on the phone itself, no computer needed: in Android's own Terminal app (the Linux /
+Debian one from Developer options > "Linux development environment"), or in Termux.
 
-Termux's own adb connects to the phone's "Wireless debugging" (Developer options, Android 11+) at
-127.0.0.1. That gives the bot the same access a computer on USB has (taps, screenshots, scrcpy,
-uiautomator2), so the rest of the bot works unchanged. The first time, Termux has to be paired
-with the phone once (like allowing a computer); after that it connects by itself.
+adb in there connects to the phone's own "Wireless debugging" (Developer options, Android 11+).
+That gives the bot the same access a computer on USB has (taps, screenshots, scrcpy,
+uiautomator2), so the rest of the bot works unchanged. The Terminal app's Linux runs in a virtual
+machine, so it reaches the phone at its Wi-Fi address (typed in once, then remembered); Termux runs
+on Android itself and uses 127.0.0.1. The first time, adb has to be paired with the phone once (like
+allowing a computer); after that the bot connects by itself.
 
 Used by ArrowBot.py when it starts and by bot.py whenever it (re)connects.
 """
+import errno
 import os
+import platform
 import re
+import selectors
 import socket
 import struct
 import subprocess
 import sys
 import time
 
-ON_PHONE = hasattr(sys, "getandroidapilevel") or "ANDROID_ROOT" in os.environ
-TERMINAL_PACKAGE = os.environ.get("TERMUX_APP__PACKAGE_NAME") or "com.termux"
-HOST = "127.0.0.1"
+IN_TERMUX = hasattr(sys, "getandroidapilevel") or "ANDROID_ROOT" in os.environ
+# Android's Terminal app: Debian in a VM (user "droid"), the phone's Download folder at /mnt/shared
+IN_TERMINAL_APP = (not IN_TERMUX and sys.platform.startswith("linux")
+                   and platform.machine() in ("aarch64", "arm64")
+                   and os.path.isdir("/mnt/shared") and os.path.isdir("/home/droid"))
+_forced = os.environ.get("ARROWBOT_ON_PHONE")   # "1" / "0": ArrowBot.py --on-phone, or by hand
+ON_PHONE = (IN_TERMUX or IN_TERMINAL_APP) if _forced not in ("0", "1") else _forced == "1"
+VM = ON_PHONE and not IN_TERMUX   # the phone is another machine on the network, not 127.0.0.1
+TERMINAL_APPS = ("virtualization.terminal", os.environ.get("TERMUX_APP__PACKAGE_NAME") or "com.termux")
 
-ADB_HELP = """[-] adb wasn't found. In Termux it comes with android-tools:
+HERE = os.path.dirname(os.path.abspath(__file__))
+ADDRESS_FILE = os.path.join(HERE, "Temp", "phone_address.txt")   # the phone's Wi-Fi IP (VM only)
+
+if IN_TERMUX:
+    ADB_HELP = """[-] adb wasn't found. In Termux it comes with android-tools:
       pkg install android-tools
     then run this again."""
+else:
+    ADB_HELP = """[-] adb wasn't found. Install it in the Terminal app:
+      sudo apt update && sudo apt install adb
+    then run this again."""
 
-WIRELESS_HELP = """[!] On the phone the bot works through Android's "Wireless debugging" (Android 11 or newer):
-    1. Settings > About phone > tap "Build number" 7 times (this turns on Developer options).
+ADB_TOO_OLD = """[-] This adb ({version}) is too old to pair with Wireless debugging (that needs adb 30 or newer).
+    On Debian 12 (bookworm) get the newer one from bookworm-backports:
+      echo 'deb http://deb.debian.org/debian bookworm-backports main' | sudo tee /etc/apt/sources.list.d/backports.list
+      sudo apt update && sudo apt install -t bookworm-backports adb
+    then run this again."""
+
+WIRELESS_STEPS = """    1. Settings > About phone > tap "Build number" 7 times (this turns on Developer options).
     2. Be on Wi-Fi (Wireless debugging only runs on Wi-Fi; it doesn't need internet).
     3. Settings > System > Developer options > turn on "Wireless debugging".
        (menu names vary by phone; step by step, "Connect to a device over Wi-Fi":
-        https://developer.android.com/tools/adb)
-    Waiting for it... (Ctrl+C to stop)"""
+        https://developer.android.com/tools/adb)"""
 
-PAIR_HELP = """[!] Wireless debugging is on. Termux has to be allowed once, like a computer (pairing):
-    1. Put Settings and Termux side by side (split screen or pop-up view) so you can see both.
+WIRELESS_HELP = ("""[!] On the phone the bot works through Android's "Wireless debugging" (Android 11 or newer):
+""" + WIRELESS_STEPS + """
+    Waiting for it... (Ctrl+C to stop)""")
+
+ADDRESS_HELP = ("""[!] On the phone the bot works through Android's "Wireless debugging" (Android 11 or newer):
+""" + WIRELESS_STEPS + """
+    4. Tap "Wireless debugging" to open it. Under "IP address & Port" it shows something like
+       192.168.1.23:41234 - type that here (split screen helps to see both).""")
+
+PAIR_HELP = """[!] Wireless debugging is on. adb here has to be allowed once, like a computer (pairing):
+    1. Put Settings and this terminal side by side (split screen or pop-up view) so you can see both.
     2. Settings > Developer options > Wireless debugging > "Pair device with pairing code".
-    3. Type here the port shown after the ':' under "IP address & Port" in that box, then the code."""
+    3. Type here the "IP address & Port" shown in that box (e.g. 192.168.1.23:37123), then the code."""
 
-PAIR_BY_HAND = """[!] Wireless debugging is on, but Termux isn't paired with the phone yet. In Termux, run once:
-      adb pair 127.0.0.1:PORT CODE
-    with PORT and CODE from Settings > Developer options > Wireless debugging > "Pair device with
-    pairing code" (split screen to see both). Waiting... (Ctrl+C to stop)"""
+PAIR_BY_HAND = """[!] Wireless debugging is on, but adb here isn't paired with the phone yet. Run once:
+      adb pair IP:PORT CODE
+    with the IP address & Port and the code from Settings > Developer options > Wireless debugging >
+    "Pair device with pairing code" (split screen to see both). Waiting... (Ctrl+C to stop)"""
 
 # adb's wire protocol: a CONNECT is answered with STLS (wireless debugging), AUTH or CNXN ("adb tcpip")
 A_CNXN, A_AUTH, A_STLS = 0x4E584E43, 0x48545541, 0x534C5453
+_port_hint = {}   # host -> port typed in by the user (tried before searching)
 
 
 def _adb(adb, *args, timeout=15):
@@ -54,12 +88,45 @@ def _adb(adb, *args, timeout=15):
         return str(e)
 
 
-def connected(adb):
-    """Serial of this phone ("127.0.0.1:PORT") if Termux's adb is already connected to it."""
+def adb_too_old(adb):
+    """The adb version text if it predates wireless pairing (adb 30), else None."""
+    m = re.search(r"Version (\d+)[.\d]*\S*", _adb(adb, "version"))
+    return m.group(0) if m and int(m.group(1)) < 30 else None
+
+
+def phone_host():
+    """Where the phone's adbd is: 127.0.0.1 in Termux, its Wi-Fi IP from the Terminal app's VM."""
+    if not VM:
+        return "127.0.0.1"
+    try:
+        with open(ADDRESS_FILE) as f:
+            return f.read().strip() or None
+    except OSError:
+        return None
+
+
+def _save_host(ip):
+    os.makedirs(os.path.dirname(ADDRESS_FILE), exist_ok=True)
+    with open(ADDRESS_FILE, "w") as f:
+        f.write(ip)
+
+
+def _parse_address(text):
+    """'192.168.1.23:41234' -> ('192.168.1.23', 41234); '41234' -> (None, 41234); else (None, None)."""
+    m = re.search(r"(?:(\d{1,3}(?:\.\d{1,3}){3})\s*:\s*)?(\d{2,5})\s*$", text.strip())
+    return (m.group(1), int(m.group(2))) if m else (None, None)
+
+
+def connected(adb, host):
+    """Serial of this phone ("HOST:PORT") if adb is already connected to it."""
     for line in _adb(adb, "devices").splitlines()[1:]:
         serial, _, state = line.partition("\t")
-        if state.strip() == "device" and serial.startswith((HOST + ":", "localhost:")):
-            return serial.strip()
+        serial, state = serial.strip(), state.strip()
+        if state != "device" or ":" not in serial:
+            continue
+        ip = serial.rsplit(":", 1)[0]
+        if ip in (host, "localhost") or (host is None and re.fullmatch(r"\d+(\.\d+){3}", ip)):
+            return serial
     return None
 
 
@@ -72,33 +139,43 @@ def _port_range():
         return 32768, 60999
 
 
-def _open_ports():
-    """Ports something listens on at 127.0.0.1. Wireless debugging picks a new random port each
-    time it's switched on; a closed port answers at once, so trying them all takes a second or two.
+def _open_ports(host, batch=500, wait=0.5):
+    """Ports something listens on at `host`. Wireless debugging picks a new random port each time
+    it's switched on; closed ports answer at once, so trying them all takes a few seconds (many
+    at a time, so even a phone that doesn't answer for closed ports is done in ~30s).
     5555 first: a port opened earlier with `adb tcpip 5555` from a computer works too."""
     lo, hi = _port_range()
+    ports = [5555] + [p for p in range(lo, hi + 1) if p != 5555]
     found = []
-    for port in [5555] + list(range(lo, hi + 1)):
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(0.2)
-        try:
-            if s.connect_ex((HOST, port)) == 0:
-                found.append(port)
-        except OSError:
-            pass
-        finally:
+    for i in range(0, len(ports), batch):
+        sel = selectors.DefaultSelector()
+        socks = []
+        for port in ports[i:i + batch]:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.setblocking(False)
+            socks.append(s)
+            if s.connect_ex((host, port)) in (0, errno.EINPROGRESS, errno.EWOULDBLOCK, 10035):  # 10035: Windows
+                sel.register(s, selectors.EVENT_WRITE, port)
+        end = time.time() + wait
+        while sel.get_map() and time.time() < end:
+            for key, _ in sel.select(timeout=max(0.0, end - time.time())):
+                if key.fileobj.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR) == 0:
+                    found.append(key.data)
+                sel.unregister(key.fileobj)
+        sel.close()
+        for s in socks:
             s.close()
-    return found
+    return sorted(found, key=lambda p: (p != 5555, p))
 
 
-def _is_adbd(port):
+def _is_adbd(host, port):
     """The port answers an adb CONNECT the way the phone's adbd does (other apps listen too)."""
     payload = b"host::\0"
     msg = struct.pack("<6I", A_CNXN, 0x01000001, 256 * 1024, len(payload), sum(payload),
                       A_CNXN ^ 0xFFFFFFFF) + payload
     try:
-        with socket.create_connection((HOST, port), timeout=0.5) as s:
-            s.settimeout(1.0)
+        with socket.create_connection((host, port), timeout=1.0) as s:
+            s.settimeout(1.5)
             s.sendall(msg)
             head = s.recv(24)
     except OSError:
@@ -116,20 +193,26 @@ def _ready(adb, serial, wait=8.0):
 
 
 def try_connect(adb):
-    """One attempt. (serial, None) when connected; otherwise (None, why): "off" = no wireless
-    debugging found, "pair" = it's on but Termux isn't paired with it yet."""
-    serial = connected(adb)
+    """One attempt. (serial, None) when connected; otherwise (None, why): "address" = the phone's
+    Wi-Fi IP isn't known yet (VM), "off" = no wireless debugging found, "pair" = it's on but adb
+    here isn't paired with it yet."""
+    host = phone_host()
+    serial = connected(adb, host)
     if serial:
+        if host is None:
+            _save_host(serial.rsplit(":", 1)[0])    # connected by hand: remember where the phone is
         return serial, None
+    if host is None:
+        return None, "address"
+    hint = _port_hint.pop(host, None)
+    ports = [hint] if hint and _is_adbd(host, hint) else [p for p in _open_ports(host) if _is_adbd(host, p)]
     unpaired = False
-    for port in _open_ports():
-        if not _is_adbd(port):
-            continue
-        serial = f"{HOST}:{port}"
+    for port in ports:
+        serial = f"{host}:{port}"
         out = _adb(adb, "connect", serial, timeout=20)
         if "connected to" in out and _ready(adb, serial):    # also "already connected to"
             return serial, None
-        unpaired = True                 # it's adbd, but it won't let this Termux in
+        unpaired = True                 # it's adbd, but it won't let this adb in
         _adb(adb, "disconnect", serial, timeout=5)
     return None, ("pair" if unpaired else "off")
 
@@ -144,17 +227,34 @@ def _ask(prompt):
     return line.strip()
 
 
+def ask_address(explain=True):
+    """VM: ask for the "IP address & Port" Wireless debugging shows (Enter alone: just look again)."""
+    if explain:
+        print(ADDRESS_HELP)
+    ip, port = _parse_address(_ask("    IP address & Port (e.g. 192.168.1.23:41234; Enter = look again): "))
+    if ip is None and port is not None and phone_host():
+        ip = phone_host()                   # only the port typed: same phone as before
+    if ip is None:
+        return
+    _save_host(ip)
+    if port:
+        _port_hint[ip] = port
+
+
 def pair(adb, explain=True):
-    """Ask for the port and code the phone shows and pair Termux's adb with it. True if it worked."""
+    """Ask for the address and code the phone shows and pair adb with it. True if it worked."""
     if explain:
         print(PAIR_HELP)
-    port = re.search(r"(\d{2,5})\s*$", _ask("    Port (e.g. 37123): "))
+    ip, port = _parse_address(_ask("    IP address & Port (e.g. 192.168.1.23:37123): "))
     code = re.sub(r"\D", "", _ask("    Pairing code (6 digits): "))
-    if not port or not code:
-        print("[-] That needs the port and the 6-digit code. Once more:")
+    host = (ip or phone_host()) if VM else "127.0.0.1"
+    if not port or not code or not host:
+        print("[-] That needs the IP address & Port and the 6-digit code. Once more:")
         return False
-    out = _adb(adb, "pair", f"{HOST}:{port.group(1)}", code, timeout=30)
+    out = _adb(adb, "pair", f"{host}:{port}", code, timeout=30)
     if "Successfully paired" in out:
+        if VM:
+            _save_host(host)
         print("[+] Paired: from now on the bot connects to this phone by itself.")
         return True
     print(f"[-] Pairing didn't work ({out or 'no answer'}). Tap the pairing option again for a new code.")
@@ -162,8 +262,8 @@ def pair(adb, explain=True):
 
 
 def wait_until_connected(adb="adb"):
-    """Connect Termux's adb to this phone (pairing it the first time), waiting as long as it takes.
-    Every later adb / uiautomator2 call goes to it (ANDROID_SERIAL). Returns the serial."""
+    """Connect adb to this phone (pairing it the first time), waiting as long as it takes. Every
+    later adb / uiautomator2 call goes to it (ANDROID_SERIAL). Returns the serial."""
     interactive = sys.stdin is not None and sys.stdin.isatty()
     shown = None
     while True:
@@ -173,22 +273,30 @@ def wait_until_connected(adb="adb"):
             if shown:
                 print("[+] Connected to the phone's wireless debugging.")
             return serial
-        if why == "pair" and interactive:
+        if interactive:
             try:
-                pair(adb, explain=shown != "pair")
-                shown = "pair"
-                continue
-            except EOFError:            # no keyboard after all: explain how to pair by hand
+                if why == "pair":
+                    pair(adb, explain=shown != "pair")
+                    shown = "pair"
+                    continue
+                if VM:                      # "address" / "off": the IP or port may have changed
+                    ask_address(explain=shown != "address")
+                    shown = "address"
+                    continue
+            except EOFError:            # no keyboard after all: explain what to do by hand
                 interactive = False
         if why != shown:
-            print(WIRELESS_HELP if why == "off" else PAIR_BY_HAND)
+            print({"pair": PAIR_BY_HAND, "off": WIRELESS_HELP}.get(why) or
+                  ADDRESS_HELP + "\n    Or connect by hand once: adb connect IP:PORT. Waiting... (Ctrl+C to stop)")
             shown = why
         time.sleep(3)
 
 
 def wake_lock(on):
     """Termux's wake lock: Android keeps Termux (and so the bot) running at full speed while the
-    game is the open app."""
+    game is the open app. (The Terminal app keeps its Linux running while the screen is on.)"""
+    if not IN_TERMUX:
+        return
     try:
         subprocess.run(["termux-wake-lock" if on else "termux-wake-unlock"], capture_output=True, timeout=10)
     except Exception:

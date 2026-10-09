@@ -1,6 +1,7 @@
 """
 Arrows bot - plays the Android game "Arrows" (com.arrow.out) on a USB-connected phone, or on the
-phone itself in Termux (no computer: it uses the phone's own Wireless debugging, see onphone.py).
+phone itself in Android's Terminal app / Termux (no computer: it uses the phone's own Wireless
+debugging, see onphone.py). Stop it with the "Arrow bot is playing" notification, Esc / q, or Ctrl+C.
 
     python bot.py                 play (asks whether to show the phone screen on this PC)
     python bot.py --show          play and show the phone screen in a window (view only)
@@ -864,10 +865,11 @@ def launch_game():
 TERMINAL_CHECK_EVERY = 2.0   # on the phone, outside levels: seconds between "is Termux open?" checks
 
 def terminal_in_front():
-    """On the phone: Termux (where the bot runs) is the open app, so you're looking at the bot or
-    about to stop it. Taps, BACK and relaunching the game would land in Termux: the bot pauses."""
+    """On the phone: the terminal the bot runs in (the Terminal app or Termux) is the open app, so
+    you're looking at the bot or about to stop it. Taps, BACK and relaunching the game would land
+    in it: the bot pauses."""
     out = adb_run(["shell", "dumpsys window | grep -E 'mCurrentFocus|mFocusedApp'"], timeout=5)
-    return onphone.TERMINAL_PACKAGE in out and GAME_PACKAGE not in out
+    return any(app in out for app in onphone.TERMINAL_APPS) and GAME_PACKAGE not in out
 
 class Tapper:
     """
@@ -3596,11 +3598,12 @@ def run_solver(deadline=None):
             last_terminal_check = current_time
             if terminal_in_front():
                 tapper.clear(wait=False)
-                print("[*] Termux is open: paused. Ctrl+C here stops the bot; open the game to carry on.")
+                print("[*] Paused while the terminal is open. Tap ESC (or press q) here to stop the bot;"
+                      " go back to the game to carry on.")
                 while terminal_in_front():
                     time.sleep(1.0)
-                print("[*] Back from Termux: carrying on.")
-                last_progress = last_fg_check = time.time()   # (a minute in Termux isn't "stuck")
+                print("[*] Back in the game: carrying on.")
+                last_progress = last_fg_check = time.time()   # (a minute in the terminal isn't "stuck")
                 min_frame_time = time.time()
                 continue
 
@@ -4293,13 +4296,21 @@ class _UserOut:
 
 
 def _keys_ok():
-    """Single key presses can be read (a real Windows console)."""
-    return os.name == "nt" and sys.stdin is not None and sys.stdin.isatty()
+    """Single key presses can be read (a real console: Windows, or a Linux / Termux terminal)."""
+    if sys.stdin is None or not sys.stdin.isatty():
+        return False
+    if os.name == "nt":
+        return True
+    try:
+        import termios  # noqa: F401
+        return True
+    except ImportError:
+        return False
 
 
 def _ask_key(prompt):
     """y/N question answered with one key; Esc quits."""
-    if not _keys_ok():
+    if os.name != "nt" or not _keys_ok():
         try:
             return input(prompt).strip().lower().startswith("y")
         except EOFError:
@@ -4321,40 +4332,169 @@ def _ask_key(prompt):
             return False
 
 
-def _start_esc_quit():
-    """Esc in this console stops the bot the same way Ctrl+C does: no more taps, phone screen back
-    on, scrcpy closed, the phone's sleep setting restored - and exit code 0, so the supervisor
-    doesn't restart it."""
+_tty_saved = None   # (fd, settings) of this terminal before keys were switched to one-at-a-time
+
+def _remember_tty():
+    global _tty_saved
+    if os.name != "nt" and _keys_ok() and _tty_saved is None:
+        import termios
+        fd = sys.stdin.fileno()
+        _tty_saved = (fd, termios.tcgetattr(fd))
+        atexit.register(_restore_tty)
+
+def _restore_tty():
+    """Terminal back to normal typing (echo, whole lines)."""
+    if _tty_saved is not None:
+        import termios
+        try:
+            termios.tcsetattr(_tty_saved[0], termios.TCSADRAIN, _tty_saved[1])
+        except Exception:
+            pass
+
+
+# -----------------------------------------------------------------------------
+# STOPPING: the stop button (a notification on the phone), Esc / q in this window, or Ctrl+C
+# -----------------------------------------------------------------------------
+def show_stopped():
+    """The stop button turns into "Arrow bot stopped" (Android's shell can't remove a notification)."""
+    _post_notification("Arrow bot stopped", "Swipe this away.")
+
+def stop_bot(why):
+    """Stop the same way Ctrl+C does: no more taps, phone screen back on, scrcpy closed, the
+    phone's sleep setting restored - and exit code 0, so the supervisor doesn't restart it."""
+    print(f"\n[*] {why}: stopping the bot...")
+    alone = os.environ.get("ARROWBOT_SUPERVISED") != "1"   # (else the supervisor does the last two)
+    for step in (lambda: tapper is not None and tapper.stop(),
+                 lambda: link is not None and restore_screen(),
+                 lambda: link is not None and link.stop(),
+                 stop_desktop_view,
+                 _restore_tty,
+                 lambda: alone and restore_phone_sleep(),
+                 lambda: alone and show_stopped()):
+        try:
+            step()
+        except Exception:
+            pass
+    try:
+        sys.stdout.flush()
+    except Exception:
+        pass
+    os._exit(0)
+
+
+def _start_stop_keys():
+    """Esc (or q) in this window stops the bot. In Android's Terminal app, ESC is a button in the
+    row of keys above the keyboard."""
     if not _keys_ok():
         return
-    import msvcrt
+    if os.name == "nt":
+        import msvcrt
+
+        def pressed():
+            while msvcrt.kbhit():
+                if msvcrt.getwch() in ("\x1b", "q", "Q"):
+                    return True
+            return False
+    else:
+        import select
+        import tty
+        _remember_tty()
+        fd = _tty_saved[0]
+        tty.setcbreak(fd)        # keys arrive one at a time, not echoed (Ctrl+C still works)
+
+        def pressed():
+            if not select.select([fd], [], [], 0)[0]:
+                return False
+            # a lone Esc; arrow keys etc. also start with Esc but come with more bytes
+            return os.read(fd, 64) in (b"\x1b", b"q", b"Q")
 
     def watch():
         while True:
             try:
-                if msvcrt.kbhit() and msvcrt.getwch() == "\x1b":
+                if pressed():
                     break
             except Exception:
                 return
             time.sleep(0.05)
-        print("\n[*] Esc pressed: stopping the bot...")
-        for step in (lambda: tapper is not None and tapper.stop(),
-                     lambda: link is not None and restore_screen(),
-                     lambda: link is not None and link.stop(),
-                     stop_desktop_view,
-                     lambda: os.environ.get("ARROWBOT_SUPERVISED") != "1" and restore_phone_sleep()):
-            try:
-                step()
-            except Exception:
-                pass
-        try:
-            sys.stdout.flush()
-        except Exception:
-            pass
-        os._exit(0)
+        stop_bot("Stop key pressed")
 
     threading.Thread(target=watch, daemon=True).start()
-    print("[*] Press Esc (in this window) to stop the bot.")
+
+
+STOP_TAG = "arrowbot"
+STOP_KEY = f"|com.android.shell|2020|{STOP_TAG}|"   # in the notification's key: user|package|id|tag|uid
+STOP_CHECK_EVERY = 1.0    # seconds between looks at the phone's event log
+STOP_REASONS = ("1", "2") # notification_canceled reasons that mean "stop": clicked, swiped away
+
+def _post_notification(title, text, intent=""):
+    """A notification from Android's shell, always the same one (tag STOP_TAG): posting replaces it."""
+    adb_run(["shell", f"cmd notification post -t '{title}' {intent} {STOP_TAG} '{text}'"], timeout=10)
+
+class StopButton:
+    """A notification on the phone: "Arrow bot is playing - tap here to stop it". Android's shell
+    can post a notification but hears nothing back, so the bot reads the phone's event log (every
+    tap or swipe on a notification is written there) once a second. Tapping it (or swiping it
+    away) stops the bot; on the phone the tap also opens the terminal the bot runs in."""
+
+    def __init__(self):
+        self.intent = self._tap_opens()
+        self.since = None
+
+    @staticmethod
+    def _tap_opens():
+        """What a tap opens: the terminal the bot runs in. Named exactly (package/activity):
+        Android adds a data URI to the intent, which a plain "open this app" wouldn't match.
+        Elsewhere (or if it can't be found) a broadcast nobody listens to: just the tap."""
+        if ON_PHONE:
+            want = onphone.TERMINAL_APPS[1] if onphone.IN_TERMUX else onphone.TERMINAL_APPS[0]
+            out = adb_run(["shell", "pm", "list", "packages", want], timeout=10)
+            pkgs = [l.split(":", 1)[1].strip() for l in out.splitlines() if l.startswith("package:")]
+            for pkg in sorted(pkgs, key=lambda p: p != want):
+                out = adb_run(["shell", "cmd", "package", "resolve-activity", "--brief", pkg], timeout=10)
+                found = [l.strip() for l in out.splitlines() if re.fullmatch(r"[\w.]+/[\w.$]+", l.strip())]
+                if found:
+                    return f"-c activity -f 0x10000000 {found[-1]}"
+        return f"-c broadcast -a {STOP_TAG}.STOP {STOP_TAG}:stop"
+
+    def show(self):
+        """(Re)post it. Only taps / swipes from now on count."""
+        now = adb_run(["shell", "date", "+%s"], timeout=5).strip()
+        self.since = float(now) if now.isdigit() else time.time()
+        _post_notification("Arrow bot is playing", "Tap here to stop it.", self.intent)
+
+    def check(self):
+        """"stop" (tapped / swiped away), "gone" (cleared some other way, e.g. "Clear all") or None."""
+        out = adb_run(["shell", f"logcat -b events -t 2000 -v epoch | grep -F '{STOP_KEY[1:]}'"], timeout=5)
+        result = None
+        for line in out.splitlines():
+            t = re.match(r"\s*(\d+(?:\.\d+)?)\s", line)
+            if not t or float(t.group(1)) < self.since:
+                continue
+            if "notification_clicked" in line:
+                return "stop"
+            if "notification_canceled" in line:
+                reason = re.search(re.escape(STOP_KEY) + r"\d+,(\d+)", line)
+                if reason and reason.group(1) in STOP_REASONS:
+                    return "stop"
+                result = "gone"
+        return result
+
+    def start(self):
+        self.show()
+
+        def watch():
+            while True:
+                time.sleep(STOP_CHECK_EVERY)
+                try:
+                    what = self.check()
+                except Exception:
+                    continue
+                if what == "stop":
+                    stop_bot("Stop button tapped")
+                elif what == "gone":
+                    self.show()            # taken away by "Clear all": put it back
+
+        threading.Thread(target=watch, daemon=True).start()
 
 
 if __name__ == "__main__":
@@ -4369,14 +4509,16 @@ if __name__ == "__main__":
         # crash inside the video decoder can't be caught from Python). The game keeps running
         # meanwhile, so a restart costs a few seconds, not the level. Ctrl+C stops both.
         show = ask_show_screen()
-        # the phone is kept awake only while the bot runs: put its setting back on any exit
+        # the phone is kept awake only while the bot runs: put its setting back on any exit, and
+        # the stop button says the bot stopped (registered first: runs after the restore)
+        atexit.register(show_stopped)
         atexit.register(restore_phone_sleep)
         on_console_close(restore_phone_sleep)
+        _remember_tty()                    # (a crashed bot could leave it typing one key at a time)
         if ON_PHONE:
             # the game is the open app while the bot plays: keep Termux running at full speed
             onphone.wake_lock(True)
             atexit.register(onphone.wake_lock, False)
-            print("[*] Running on the phone. To stop: open Termux (the bot pauses) and press Ctrl+C.")
         first = True
         while True:
             child = subprocess.Popen([sys.executable, os.path.abspath(__file__), "--child",
@@ -4404,15 +4546,22 @@ if __name__ == "__main__":
             time.sleep(2)
         sys.exit(0)
     sys.stdout = _UserOut(sys.stdout)
-    _start_esc_quit()
+    if os.name == "nt":
+        _start_stop_keys()         # (elsewhere after connecting: pairing may still need typed lines)
     if os.environ.get("ARROWBOT_SUPERVISED") != "1":
         # started on its own (python bot.py --child): nobody else will put the phone's sleep back
+        atexit.register(show_stopped)
         atexit.register(restore_phone_sleep)
         on_console_close(restore_phone_sleep)
     show_screen = ask_show_screen()
     print(f"===== bot started {time.strftime('%Y-%m-%d %H:%M:%S')} =====")
     disable_quick_edit()
     connect()
+    if os.name != "nt":
+        _start_stop_keys()
+    StopButton().start()
+    print("[*] To stop the bot: tap the \"Arrow bot is playing\" notification on the phone"
+          + (", or Esc / q in this window." if _keys_ok() else "."))
     if show_screen:
         start_desktop_view()
     while True:
