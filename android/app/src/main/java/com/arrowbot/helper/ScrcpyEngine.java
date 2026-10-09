@@ -28,6 +28,8 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 
 import io.github.muntashirakon.adb.AdbStream;
@@ -51,8 +53,14 @@ final class ScrcpyEngine implements FrameSource {
     private static final int MSG_INJECT_TOUCH = 2, MSG_SET_DISPLAY_POWER = 10;
     private static final int DOWN = 0, UP = 1, MOVE = 2;
     private static final long FINGER = -2;      // POINTER_GENERIC_FINGER
-    /** Nobody used it (no frames asked for, no taps) for this long: stopped (the bot is gone). */
-    private static final long IDLE_STOP_MS = 30_000;
+    /** No bot holds it and nobody used it (no frames asked for, no taps) for this long: stopped
+     *  (the bot is gone). Long enough for the bot's first start (unpacking Python). */
+    private static final long IDLE_STOP_MS = 180_000;
+    /** No new picture for this long (scrcpy repeats it every 100 ms even when nothing moves):
+     *  the server or the connection died without saying so. */
+    private static final long STALL_MS = 6_000;
+    /** Bot connections using it (streaming, screen off, keeping awake). */
+    static final AtomicInteger holders = new AtomicInteger();
 
     static volatile ScrcpyEngine instance;
     static volatile String status = "off";
@@ -62,12 +70,15 @@ final class ScrcpyEngine implements FrameSource {
     private AdbStream server, video, control;
     private OutputStream controlOut;
     private volatile boolean alive;
+    private final AtomicBoolean stopped = new AtomicBoolean();
     private volatile long lastUse = SystemClock.uptimeMillis();
     private final ExecutorService touches = Executors.newSingleThreadExecutor();
     private HandlerThread codecThread;
     private Handler codecHandler;
     private volatile MediaCodec codec;
-    private final LinkedBlockingQueue<Integer> freeInputs = new LinkedBlockingQueue<>();
+    private final Object codecLock = new Object();
+    /** Free decoder input buffers: (codec, index), so one of a codec that was replaced is never used. */
+    private final LinkedBlockingQueue<Object[]> freeInputs = new LinkedBlockingQueue<>();
     private volatile int videoW, videoH;        // video size = touch coordinates
 
     // the newest frame (front), and the one being filled (back)
@@ -75,6 +86,7 @@ final class ScrcpyEngine implements FrameSource {
     private byte[] front = new byte[0], back = new byte[0];
     private int frontW, frontH, frontFormat, frontBytes;
     private long seq = 0, frontNs = 0;
+    private volatile long lastFrameAt = SystemClock.uptimeMillis();
 
     private ScrcpyEngine(Context c, Adb adb) {
         this.context = c.getApplicationContext();
@@ -105,15 +117,16 @@ final class ScrcpyEngine implements FrameSource {
             return e;
         } catch (Exception ex) {
             Log.w(TAG, "scrcpy over adb", ex);
-            status = "couldn't start (" + ex.getMessage() + ")";
-            if (e != null) e.stop();
+            if (e != null) e.stop("couldn't start (" + ex.getMessage() + ")");
+            else status = "couldn't start (" + ex.getMessage() + ")";
             return null;
         }
     }
 
+    /** (Stops the server over the network: not on the main thread.) */
     static void stopAll() {
         ScrcpyEngine e = instance;
-        if (e != null) e.stop();
+        if (e != null) new Thread(() -> e.stop("stopped"), "scrcpy-stop").start();
     }
 
     // ------------------------------------------------------------------ start / stop
@@ -144,6 +157,7 @@ final class ScrcpyEngine implements FrameSource {
 
         // the server listens a moment after it starts: until then, opening its socket is refused
         long end = SystemClock.uptimeMillis() + 8000;
+        Thread.sleep(300);
         while (video == null) {
             try {
                 video = adb.openStream("localabstract:" + name);
@@ -168,31 +182,46 @@ final class ScrcpyEngine implements FrameSource {
         }
     }
 
-    void stop() {
-        if (!alive && server == null) return;
+    /** Stop everything (the server's cleanup turns the screen back on). Any thread, any number of
+     *  times; `why` is shown in the app. */
+    void stop(String why) {
         alive = false;
+        if (!stopped.compareAndSet(false, true)) {
+            releaseCodec();                 // (a decoder started while it was stopping)
+            return;
+        }
         if (instance == this) instance = null;
-        status = "off";
+        status = why;
         for (AdbStream s : new AdbStream[]{video, control, server}) {
             try {
                 if (s != null) s.close();
-            } catch (IOException ignored) {
+            } catch (Exception ignored) {
             }
         }
-        server = null;
         touches.shutdownNow();
-        MediaCodec c = codec;
-        codec = null;
+        releaseCodec();
+        if (codecThread != null) codecThread.quitSafely();
+        synchronized (lock) {
+            lock.notifyAll();
+        }
+    }
+
+    private void releaseCodec() {
+        MediaCodec c;
+        synchronized (codecLock) {
+            c = codec;
+            codec = null;
+            freeInputs.clear();
+        }
         if (c != null) {
             try {
                 c.stop();
             } catch (RuntimeException ignored) {
             }
-            c.release();
-        }
-        if (codecThread != null) codecThread.quitSafely();
-        synchronized (lock) {
-            lock.notifyAll();
+            try {
+                c.release();
+            } catch (RuntimeException ignored) {
+            }
         }
     }
 
@@ -224,7 +253,7 @@ final class ScrcpyEngine implements FrameSource {
         }
         if (alive) {
             Log.w(TAG, "scrcpy's server ended");
-            stop();
+            stop("scrcpy's server ended");
         }
     }
 
@@ -241,9 +270,13 @@ final class ScrcpyEngine implements FrameSource {
     private void idleWatch() {
         while (alive) {
             SystemClock.sleep(1000);
-            if (SystemClock.uptimeMillis() - lastUse > IDLE_STOP_MS) {
+            long now = SystemClock.uptimeMillis();
+            if (holders.get() <= 0 && now - lastUse > IDLE_STOP_MS) {
                 Log.i(TAG, "scrcpy over adb: not used any more, stopping");
-                stop();
+                stop("off (not used)");
+            } else if (seq > 0 && now - lastFrameAt > STALL_MS) {
+                Log.w(TAG, "scrcpy over adb: no picture for " + (now - lastFrameAt) + " ms, stopping");
+                stop("the picture stopped");
             }
         }
     }
@@ -271,14 +304,16 @@ final class ScrcpyEngine implements FrameSource {
                 in.readFully(packet, 0, size);
                 MediaCodec c = codec;
                 if (c == null) continue;
-                Integer index = null;
-                while (alive && codec == c && (index = freeInputs.poll(500, TimeUnit.MILLISECONDS)) == null) {
+                Object[] free = null;
+                while (alive && codec == c && (free = freeInputs.poll(500, TimeUnit.MILLISECONDS)) == null) {
                     // the decoder is busy: wait for an input buffer
                 }
-                if (index == null || codec != c) continue;
+                if (free == null || free[0] != c || codec != c) continue;
+                int index = (Integer) free[1];
                 try {
                     ByteBuffer ib = c.getInputBuffer(index);
-                    if (ib == null || ib.capacity() < size) throw new IOException("packet too big for the decoder");
+                    if (ib == null) continue;               // (decoder restarted meanwhile)
+                    if (ib.capacity() < size) throw new IOException("packet too big for the decoder");
                     ib.clear();
                     ib.put(packet, 0, size);
                     boolean config = (head & (1L << 62)) != 0;
@@ -288,33 +323,49 @@ final class ScrcpyEngine implements FrameSource {
                 } catch (IllegalStateException ignored) {       // decoder restarted meanwhile
                 }
             }
+            stop("off");
         } catch (EOFException e) {
             Log.i(TAG, "scrcpy video ended");
+            stop("the video ended");
         } catch (Exception e) {
             Log.w(TAG, "scrcpy video", e);
-            status = "video stopped (" + e.getMessage() + ")";
+            stop("video stopped (" + e.getMessage() + ")");
         }
-        stop();
     }
 
     private void startDecoder(int w, int h) throws IOException {
-        MediaCodec old = codec;
-        codec = null;
-        freeInputs.clear();
-        if (old != null) {
-            try {
-                old.stop();
-            } catch (RuntimeException ignored) {
-            }
-            old.release();
-        }
+        releaseCodec();
         videoW = w;
         videoH = h;
         MediaCodec c = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_AVC);
-        c.setCallback(new MediaCodec.Callback() {
+        c.setCallback(decoderCallback, codecHandler);
+        MediaFormat f = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, w, h);
+        f.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible);
+        f.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, Math.max(2 << 20, w * h));
+        f.setInteger(MediaFormat.KEY_PRIORITY, 0);          // real time
+        if (Build.VERSION.SDK_INT >= 30) f.setInteger(MediaFormat.KEY_LOW_LATENCY, 1);
+        try {
+            c.configure(f, null, null, 0);
+        } catch (RuntimeException e) {                      // a decoder without low-latency mode
+            c.reset();
+            c.setCallback(decoderCallback, codecHandler);
+            if (Build.VERSION.SDK_INT >= 30) f.removeKey(MediaFormat.KEY_LOW_LATENCY);
+            c.configure(f, null, null, 0);
+        }
+        synchronized (codecLock) {
+            if (!alive) {                                   // stopped meanwhile: don't leave it running
+                c.release();
+                return;
+            }
+            codec = c;
+            c.start();
+        }
+    }
+
+    private final MediaCodec.Callback decoderCallback = new MediaCodec.Callback() {
             @Override
             public void onInputBufferAvailable(MediaCodec mc, int index) {
-                if (mc == codec) freeInputs.offer(index);
+                if (mc == codec) freeInputs.offer(new Object[]{mc, index});
             }
 
             @Override
@@ -334,30 +385,13 @@ final class ScrcpyEngine implements FrameSource {
             @Override
             public void onError(MediaCodec mc, MediaCodec.CodecException e) {
                 Log.w(TAG, "decoder", e);
-                if (mc == codec && !e.isRecoverable() && !e.isTransient()) {
-                    status = "video decoder failed";
-                    stop();
-                }
+                if (mc == codec && !e.isTransient()) stop("the video decoder failed");
             }
 
             @Override
             public void onOutputFormatChanged(MediaCodec mc, MediaFormat format) {
             }
-        }, codecHandler);
-        MediaFormat f = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, w, h);
-        f.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible);
-        f.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, Math.max(2 << 20, w * h));
-        f.setInteger(MediaFormat.KEY_PRIORITY, 0);          // real time
-        if (Build.VERSION.SDK_INT >= 30) f.setInteger(MediaFormat.KEY_LOW_LATENCY, 1);
-        try {
-            c.configure(f, null, null, 0);
-        } catch (RuntimeException e) {                      // a decoder without low-latency mode
-            if (Build.VERSION.SDK_INT >= 30) f.removeKey(MediaFormat.KEY_LOW_LATENCY);
-            c.configure(f, null, null, 0);
-        }
-        codec = c;
-        c.start();
-    }
+    };
 
     /** One decoded frame -> back buffer (tight YUV rows, the image's crop), then it's the newest. */
     private void publish(Image img) {
@@ -377,11 +411,13 @@ final class ScrcpyEngine implements FrameSource {
             copyRows(ub, uStart, rs, cw, ch, back, ySize);
             copyRows(vb, vStart, p[2].getRowStride(), cw, ch, back, ySize + cw * ch);
             format = I420;
-        } else if (ps == 2 && p[2].getRowStride() == rs && interleaved(ub, vb, uStart, vStart, rs, cw, ch)) {
+        } else if (ps == 2 && p[2].getPixelStride() == 2 && p[2].getRowStride() == rs
+                && interleaved(ub, vb, uStart, vStart, rs, cw, ch)) {
             copyRows(ub, uStart, rs, 2 * cw, ch, back, ySize);     // U V U V ...: NV12
             fixLast(vb, vStart + (ch - 1) * rs + 2 * (cw - 1), back, need - 1);
             format = NV12;
-        } else if (ps == 2 && p[2].getRowStride() == rs && interleaved(vb, ub, vStart, uStart, rs, cw, ch)) {
+        } else if (ps == 2 && p[2].getPixelStride() == 2 && p[2].getRowStride() == rs
+                && interleaved(vb, ub, vStart, uStart, rs, cw, ch)) {
             copyRows(vb, vStart, rs, 2 * cw, ch, back, ySize);     // V U V U ...: NV21
             fixLast(ub, uStart + (ch - 1) * rs + 2 * (cw - 1), back, need - 1);
             format = NV21;
@@ -404,6 +440,7 @@ final class ScrcpyEngine implements FrameSource {
             frontFormat = format;
             frontBytes = need;
             frontNs = System.nanoTime();
+            lastFrameAt = SystemClock.uptimeMillis();
             seq++;
             lock.notifyAll();
         }

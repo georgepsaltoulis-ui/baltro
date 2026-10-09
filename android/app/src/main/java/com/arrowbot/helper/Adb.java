@@ -41,6 +41,9 @@ import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -49,6 +52,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import io.github.muntashirakon.adb.AbsAdbConnectionManager;
+import io.github.muntashirakon.adb.AdbConnection;
 import io.github.muntashirakon.adb.AdbStream;
 import io.github.muntashirakon.adb.android.AdbMdns;
 
@@ -60,6 +64,11 @@ import io.github.muntashirakon.adb.android.AdbMdns;
  *  - adbd on port 5555, after `adb tcpip 5555` from a computer (until the phone restarts): no
  *    Wi-Fi needed. The phone asks "Allow USB debugging?" once.
  * The app's key and certificate are made once and kept, so pairing / allowing is a one-time thing.
+ *
+ * Two hangs in libadb 3.1.1 are guarded against here: opening a stream can miss adbd's answer and
+ * wait forever (holding the library's lock), and a stream closed while data is still queued never
+ * reports its end. So every open has a time limit (past it, the connection is closed, which wakes
+ * it), and commands end on a marker of their own instead of on the stream's end.
  */
 final class Adb extends AbsAdbConnectionManager {
     private static final String TAG = HelperService.TAG;
@@ -69,9 +78,18 @@ final class Adb extends AbsAdbConnectionManager {
     static volatile String status = "not tried yet";
     static volatile boolean paired = false;
 
+    private static final ScheduledExecutorService GUARD = Executors.newSingleThreadScheduledExecutor(r -> {
+        Thread t = new Thread(r, "adb-guard");
+        t.setDaemon(true);
+        return t;
+    });
+    private static final String END = "__ARROWBOT_END__";
+
     private final Context context;
-    private final PrivateKey key;
+    private final byte[] keyBytes;
     private final Certificate cert;
+    /** The connection, kept outside libadb's lock (to close it when an open hangs). */
+    private volatile AdbConnection conn;
 
     static synchronized Adb get(Context c) throws Exception {
         if (instance == null) instance = new Adb(c.getApplicationContext());
@@ -84,7 +102,7 @@ final class Adb extends AbsAdbConnectionManager {
         setTimeout(10, TimeUnit.SECONDS);
         File keyFile = new File(c.getFilesDir(), "adb_key.pk8"), certFile = new File(c.getFilesDir(), "adb_cert.der");
         if (keyFile.exists() && certFile.exists()) {
-            key = KeyFactory.getInstance("RSA").generatePrivate(new PKCS8EncodedKeySpec(Files.readAllBytes(keyFile.toPath())));
+            keyBytes = Files.readAllBytes(keyFile.toPath());
             cert = CertificateFactory.getInstance("X.509").generateCertificate(
                     new ByteArrayInputStream(Files.readAllBytes(certFile.toPath())));
         } else {
@@ -97,16 +115,21 @@ final class Adb extends AbsAdbConnectionManager {
                     new Date(now - 86_400_000L), new Date(now + 36500L * 86_400_000L), name, kp.getPublic());
             ContentSigner signer = new JcaContentSignerBuilder("SHA256withRSA").build(kp.getPrivate());
             cert = new JcaX509CertificateConverter().getCertificate(b.build(signer));
-            key = kp.getPrivate();
-            Files.write(keyFile.toPath(), key.getEncoded());
+            keyBytes = kp.getPrivate().getEncoded();
+            Files.write(keyFile.toPath(), keyBytes);
             Files.write(certFile.toPath(), cert.getEncoded());
         }
         paired = new File(c.getFilesDir(), "adb_paired").exists();
     }
 
+    /** A fresh copy each time: libadb "destroys" the key of a connection it closes. */
     @Override
     protected PrivateKey getPrivateKey() {
-        return key;
+        try {
+            return KeyFactory.getInstance("RSA").generatePrivate(new PKCS8EncodedKeySpec(keyBytes));
+        } catch (Exception e) {
+            throw new IllegalStateException(e);
+        }
     }
 
     @Override
@@ -142,6 +165,7 @@ final class Adb extends AbsAdbConnectionManager {
             } catch (Exception e) {
                 Log.i(TAG, "adb mdns: " + e);
             }
+            dropFailed();
         }
         // 2. every port on this phone that answers like adbd: Wireless debugging again (found
         //    without mDNS), and 5555 opened with `adb tcpip 5555` from a computer
@@ -154,16 +178,22 @@ final class Adb extends AbsAdbConnectionManager {
                 } catch (Exception e) {
                     Log.i(TAG, "adb tls " + p[0] + ": " + e);
                 }
+                dropFailed();
             } else {
-                say.accept("On the phone: tap \"Allow\" in \"Allow USB debugging?\" (tick \"Always allow\").");
+                // (the first time only, the phone asks; a key it already allows gets in at once)
+                ScheduledFuture<?> ask = GUARD.schedule(() -> say.accept(
+                        "On the phone: tap \"Allow\" in \"Allow USB debugging?\" (tick \"Always allow\")."),
+                        1500, TimeUnit.MILLISECONDS);
                 setTimeout(60, TimeUnit.SECONDS);       // time to tap Allow
                 try {
                     if (connect("127.0.0.1", p[0])) return connected("adb on port " + p[0]);
                 } catch (Exception e) {
                     Log.i(TAG, "adb tcp " + p[0] + ": " + e);
                 } finally {
+                    ask.cancel(false);
                     setTimeout(10, TimeUnit.SECONDS);
                 }
+                dropFailed();
             }
         }
         status = tlsSeen ? "Wireless debugging is on, but this app isn't paired with it yet"
@@ -172,9 +202,37 @@ final class Adb extends AbsAdbConnectionManager {
     }
 
     private boolean connected(String how) {
+        conn = getAdbConnection();
         status = "connected (" + how + ")";
         markPaired();
         return true;
+    }
+
+    /** A connection attempt that failed or timed out: close it (libadb would leave its socket and
+     *  thread behind). */
+    private void dropFailed() {
+        try {
+            disconnect();
+        } catch (Exception ignored) {
+        }
+    }
+
+    /** libadb's open, with a time limit: an open that missed adbd's answer would wait forever. */
+    @Override
+    public AdbStream openStream(String destination) throws IOException, InterruptedException {
+        AdbConnection c = conn;
+        ScheduledFuture<?> guard = c == null ? null : GUARD.schedule(() -> {
+            Log.w(TAG, "adb: opening " + destination + " hung; closing the connection");
+            try {
+                c.close();          // ends its streams, so the stuck open returns (with an error)
+            } catch (Exception ignored) {
+            }
+        }, 10, TimeUnit.SECONDS);
+        try {
+            return super.openStream(destination);
+        } finally {
+            if (guard != null) guard.cancel(false);
+        }
     }
 
     private void markPaired() {
@@ -282,11 +340,17 @@ final class Adb extends AbsAdbConnectionManager {
     synchronized String pairWireless(String typed, long timeoutMs) {
         String code = null;
         int port = -1;
-        Matcher m = Pattern.compile("\\d+").matcher(typed == null ? "" : typed);
-        while (m.find()) {
-            String g = m.group();
-            if (g.length() == 6 && code == null) code = g;
-            else if (g.length() >= 4 && g.length() <= 5) port = Integer.parseInt(g);
+        typed = typed == null ? "" : typed;
+        String digits = typed.replaceAll("\\D", "");
+        if (digits.length() == 6) {
+            code = digits;                              // "123456", "123 456"
+        } else {                                        // "123456 37099": code and port
+            Matcher m = Pattern.compile("\\d+").matcher(typed);
+            while (m.find()) {
+                String g = m.group();
+                if (g.length() == 6 && code == null) code = g;
+                else if (g.length() >= 4 && g.length() <= 5) port = Integer.parseInt(g);
+            }
         }
         if (code == null) return "Type the 6-digit code from \"Pair device with pairing code\".";
         String host = "127.0.0.1";
@@ -327,22 +391,45 @@ final class Adb extends AbsAdbConnectionManager {
 
     // ------------------------------------------------------------------ using it
 
-    /** Run a shell command and return what it printed. */
+    /** Run a shell command and return what it printed (up to 20 s). */
     String shell(String command) throws Exception {
-        AdbStream s = openStream("shell:" + command);
+        AdbStream s = openStream("shell:" + command + "; echo " + END);
+        ScheduledFuture<?> guard = GUARD.schedule(() -> {
+            try {
+                s.close();                  // wakes a read that waits for an end that never comes
+            } catch (Exception ignored) {
+            }
+        }, 20, TimeUnit.SECONDS);
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         try (InputStream in = s.openInputStream()) {
             byte[] buf = new byte[8192];
             int n;
-            while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+            while ((n = in.read(buf)) > 0) {
+                out.write(buf, 0, n);
+                if (out.toString(StandardCharsets.UTF_8.name()).contains(END)) break;
+            }
         } catch (IOException ignored) {     // the stream ends when the command does
+        } finally {
+            guard.cancel(false);
+            try {
+                s.close();
+            } catch (Exception ignored) {
+            }
         }
-        return out.toString(StandardCharsets.UTF_8.name());
+        String text = out.toString(StandardCharsets.UTF_8.name());
+        int end = text.indexOf(END);
+        return end >= 0 ? text.substring(0, end) : text;
     }
 
     /** Copy data to a file on the phone (adb's own file transfer, like `adb push`). */
     void push(byte[] data, String remote) throws Exception {
         AdbStream s = openStream("sync:");
+        ScheduledFuture<?> guard = GUARD.schedule(() -> {
+            try {
+                s.close();
+            } catch (Exception ignored) {
+            }
+        }, 30, TimeUnit.SECONDS);
         try {
             OutputStream out = s.openOutputStream();
             InputStream in = s.openInputStream();
@@ -378,6 +465,7 @@ final class Adb extends AbsAdbConnectionManager {
             out.write(syncHeader("QUIT", 0));
             out.flush();
         } finally {
+            guard.cancel(false);
             s.close();
         }
     }

@@ -255,8 +255,9 @@ public class MainActivity extends Activity {
         status.setText("Accessibility:  " + (HelperService.instance != null ? "ON" : "off  <- turn it on (below)")
                 + "\nLive picture:   " + (mode.equals("adb") ? "scrcpy over adb" : mode.equals("capture")
                         ? "screen capture" : "off (on at Start)")
-                + "\nWireless debug: " + (mode.equals("adb") ? ScrcpyEngine.status : Adb.status
-                        + (Pairing.result.isEmpty() ? "" : "; pairing: " + Pairing.result))
+                + "\nWireless debug: " + Adb.status
+                + (Pairing.result.isEmpty() ? "" : "\nPairing:        " + Pairing.result)
+                + "\nscrcpy:         " + ScrcpyEngine.status
                 + "\nBot:            " + CaptureService.botState
                 + (waiting ? "\nA program (Termux?) asks to be allowed!" : ""));
         allow.setVisibility(waiting ? View.VISIBLE : View.GONE);

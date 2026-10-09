@@ -266,16 +266,20 @@ class Helper:
         self.call("STATE", text)
 
     def ensure_capture(self, wait=180):
-        """Screen capture on (the phone asks the first time each start). True when it runs."""
+        """Frames on: the app tries scrcpy over its adb first (a few seconds), else asks to allow
+        screen capture on the phone. True when frames come."""
         if self.info()[2]:
             return True
         self.call("CAPTURE")
-        print(CAPTURE_HELP)
-        end = time.time() + wait
-        while time.time() < end:
+        start = time.time()
+        told = False
+        while time.time() < start + wait:
             time.sleep(1)
             if self.info()[2]:
                 return True
+            if not told and time.time() > start + 6:      # (no adb: Android is asking by now)
+                print(CAPTURE_HELP)
+                told = True
         return False
 
 

@@ -15,7 +15,7 @@ One app with the bot inside. You don't need Termux, Wi-Fi, a hotspot or a comput
 only needed to download it.
 
 1. **Install it.** In the phone's browser, open
-   https://github.com/georgepsaltoulis-ui/baltro/raw/HEAD/ArrowBot.apk and install it (36 MB, for
+   https://github.com/georgepsaltoulis-ui/baltro/raw/HEAD/ArrowBot.apk and install it (43 MB, for
    64-bit phones such as Pixels).
    - Allow your browser to install apps if Android asks.
    - If Play Protect warns, tap *Install anyway*. It's a sideloaded app that uses accessibility.

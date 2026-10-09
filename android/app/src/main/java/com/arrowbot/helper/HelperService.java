@@ -73,13 +73,16 @@ public class HelperService extends AccessibilityService {
     private View keepOnView;
     private int keepOnCount = 0;
     /** Black overlay covering the screen ("screen off" without adb), and how many asked for it. */
-    private View blackView;
+    private volatile View blackView;
     private int blackCount = 0;
     /** When the user last turned the screen on/off with the power button (ms, wall clock): a bot
      *  that started before that doesn't turn the screen off again. */
     static volatile long userScreenAt = 0;
     /** Screen-off requests in effect (any mode): the power button ends them. */
     private int screenOffCount = 0;
+    /** Goes up at each power-button press that ended "screen off": requests from before it are
+     *  void (nothing of theirs to undo). */
+    private static volatile int screenEpoch = 0;
     private static volatile boolean captureStarting = false;
 
     private final BroadcastReceiver screenEvents = new BroadcastReceiver() {
@@ -92,6 +95,7 @@ public class HelperService extends AccessibilityService {
             // The screen was off for the bot and the power button was pressed: the user wants to
             // see the screen. It went off for real now (the game pauses): turn it on, for good.
             userScreenAt = System.currentTimeMillis();
+            screenEpoch++;
             setBlack(false, true);
             wakeScreen();
         }
@@ -214,7 +218,8 @@ public class HelperService extends AccessibilityService {
 
     private void serve(Socket socket) {
         boolean keepOn = false, screenOff = false;
-        boolean screenOffAdb = false;
+        boolean screenOffAdb = false, holding = false;
+        int offEpoch = 0;
         boolean allowed = false;
         long helloAt = 0;
         byte[] frame = null;
@@ -231,6 +236,11 @@ public class HelperService extends AccessibilityService {
                     send(out, "ERR say HELLO first");
                     continue;
                 }
+                if (!holding && (cmd.equals("STREAM") || cmd.equals("SCREEN") || cmd.equals("AWAKE"))) {
+                    holding = true;                 // a bot is using it: scrcpy over adb stays on
+                    ScrcpyEngine.holders.incrementAndGet();
+                }
+                if (screenOff && offEpoch != screenEpoch) screenOff = false;    // the power button ended it
                 try {
                     switch (cmd) {
                         case "PING":
@@ -370,6 +380,7 @@ public class HelperService extends AccessibilityService {
                                     screenOffAdb = false;
                                 }
                                 screenOff = true;
+                                offEpoch = screenEpoch;
                                 synchronized (this) {
                                     screenOffCount++;
                                 }
@@ -402,7 +413,8 @@ public class HelperService extends AccessibilityService {
         } catch (IOException ignored) {
         } finally {
             if (keepOn) keepScreenOn(false);
-            if (screenOff) screenOn(screenOffAdb);
+            if (screenOff && offEpoch == screenEpoch) screenOn(screenOffAdb);
+            if (holding) ScrcpyEngine.holders.decrementAndGet();
         }
     }
 
@@ -417,7 +429,10 @@ public class HelperService extends AccessibilityService {
         byte[] buf = cap != null ? new byte[cap.maxFrameBytes()] : null;
         long[] before = cap != null ? cap.copyFrame(0, 0, buf) : null;
         boolean wasDark = before == null || dark(buf, before);
-        setBlack(true, false);
+        if (!setBlack(true, false)) {
+            setBlack(false, false);
+            return "Android didn't let the app cover the screen";
+        }
         if (cap == null || wasDark) return null;     // (can't tell: keep it)
         SystemClock.sleep(400);
         long[] after = cap.copyFrame(before[0], 1000, buf);
@@ -453,8 +468,9 @@ public class HelperService extends AccessibilityService {
         }
     }
 
-    /** Black overlay on (one more request) / off (one less, or all of them). */
-    private void setBlack(boolean on, boolean all) {
+    /** Black overlay on (one more request) / off (one less, or all of them). Returns whether it's
+     *  showing now. */
+    private boolean setBlack(boolean on, boolean all) {
         CountDownLatch done = new CountDownLatch(1);
         main.post(() -> {
             try {
@@ -463,8 +479,8 @@ public class HelperService extends AccessibilityService {
                 if (blackCount > 0 && blackView == null) {
                     blackView = new View(this);
                     blackView.setBackgroundColor(Color.BLACK);
-                    int[] wh = screenSize();
-                    WindowManager.LayoutParams lp = new WindowManager.LayoutParams(wh[0], wh[1],
+                    WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
+                            WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT,
                             WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
                             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
                                     | WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
@@ -507,6 +523,7 @@ public class HelperService extends AccessibilityService {
                 screenOffCount = 0;
             }
         }
+        return blackView != null;
     }
 
     /** Turn the screen on (after the power button turned it off while it was "off" for the bot). */
