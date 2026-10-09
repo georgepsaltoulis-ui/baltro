@@ -21,4 +21,4 @@ dependencyResolutionManagement {
     }
 }
 rootProject.name = "ArrowBot"
-include ":app"
+include ":app", ":libadb"
