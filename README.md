@@ -64,6 +64,8 @@ With Wireless debugging on, turn on **Play in the background** in the app before
 game then runs on a hidden screen of its own: scrcpy's virtual display, which Android keeps unlocked
 and awake by itself. The bot watches and taps that screen over adb, so you can use the phone for
 anything else meanwhile, or turn its screen off. *Stop bot* closes the game with the hidden screen.
+To check on it, open the app: it shows a small live picture of the hidden screen (tap it for a
+bigger one), next to what the bot says.
 
 - It needs Wireless debugging (an app can't make such a screen without adb). With the switch on and
   Wireless debugging off, the bot doesn't start, and it never falls back to your own screen.

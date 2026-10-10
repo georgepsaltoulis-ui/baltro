@@ -556,6 +556,17 @@ final class ScrcpyEngine implements FrameSource {
         }
     }
 
+    /** The newest frame for a look at it (the app's preview of the hidden screen): like copyFrame,
+     *  but it doesn't count as using scrcpy - an open app mustn't keep it running without a bot.
+     *  Returns {seq, width, height, 0, format, bytes} or null (no frame yet). */
+    long[] peek(byte[] dest) {
+        synchronized (lock) {
+            if (seq == 0 || !alive || dest.length < frontBytes) return null;
+            System.arraycopy(front, 0, dest, 0, frontBytes);
+            return new long[]{seq, frontW, frontH, 0, frontFormat, frontBytes};
+        }
+    }
+
     // ------------------------------------------------------------------ touch and screen
 
     private void touch(int action, long pointer, float x, float y) throws IOException {

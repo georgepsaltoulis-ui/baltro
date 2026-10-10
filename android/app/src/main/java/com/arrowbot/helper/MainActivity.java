@@ -4,18 +4,21 @@ import android.Manifest;
 import android.app.Activity;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.graphics.Bitmap;
 import android.graphics.Typeface;
 import android.media.projection.MediaProjectionConfig;
 import android.media.projection.MediaProjectionManager;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
+import android.os.HandlerThread;
 import android.os.Looper;
 import android.provider.Settings;
 import android.view.View;
 import android.text.InputType;
 import android.widget.Button;
 import android.widget.EditText;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.app.AlertDialog;
 import android.content.pm.ResolveInfo;
@@ -45,6 +48,23 @@ public class MainActivity extends Activity {
     private EditText code;
     private Button game;
     private boolean finishAfterCapture, startAfterCapture;
+    // background play: a small live picture of the hidden screen (made off the main thread)
+    private ImageView preview;
+    private TextView previewTitle;
+    private boolean previewBig;
+    private HandlerThread previewThread;
+    private volatile Handler previewHandler;
+    private final Preview previewer = new Preview();
+    private static final int PREVIEW_STEP = 3, PREVIEW_EVERY_MS = 250;
+    private final Runnable previewTick = new Runnable() {
+        @Override
+        public void run() {
+            ScrcpyEngine e = HelperService.hidden();
+            Bitmap b = e != null ? previewer.grab(e, PREVIEW_STEP) : null;
+            handler.post(() -> showPreview(e != null, b));
+            if (previewHandler != null) previewHandler.postDelayed(this, PREVIEW_EVERY_MS);
+        }
+    };
 
     private final Runnable refresh = new Runnable() {
         @Override
@@ -128,6 +148,25 @@ public class MainActivity extends Activity {
         status.setTypeface(Typeface.MONOSPACE);
         status.setPadding(0, pad, 0, pad);
         box.addView(status);
+
+        previewTitle = new TextView(this);
+        previewTitle.setText("The hidden screen the bot plays on (tap it: bigger / smaller)");
+        previewTitle.setTypeface(Typeface.DEFAULT_BOLD);
+        previewTitle.setVisibility(View.GONE);
+        box.addView(previewTitle);
+        preview = new ImageView(this);
+        preview.setAdjustViewBounds(true);
+        preview.setScaleType(ImageView.ScaleType.FIT_START);
+        int border = Math.max(1, Math.round(getResources().getDisplayMetrics().density));
+        preview.setBackgroundColor(0xFF888888);
+        preview.setPadding(border, border, border, border);
+        preview.setVisibility(View.GONE);
+        preview.setOnClickListener(v -> {
+            previewBig = !previewBig;
+            sizePreview();
+        });
+        box.addView(preview);
+        sizePreview();
 
         box.addView(button("Turn on in Accessibility",
                 v -> startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))));
@@ -355,12 +394,39 @@ public class MainActivity extends Activity {
     protected void onResume() {
         super.onResume();
         handler.post(refresh);
+        previewThread = new HandlerThread("preview");
+        previewThread.start();
+        previewHandler = new Handler(previewThread.getLooper());
+        previewHandler.post(previewTick);
     }
 
     @Override
     protected void onPause() {
         handler.removeCallbacks(refresh);
+        if (previewHandler != null) previewHandler.removeCallbacks(previewTick);
+        previewHandler = null;
+        if (previewThread != null) previewThread.quitSafely();
+        previewThread = null;
         super.onPause();
+    }
+
+    /** Background play: show the newest picture of the hidden screen (null: keep the last one). */
+    private void showPreview(boolean on, Bitmap b) {
+        int vis = on ? View.VISIBLE : View.GONE;
+        if (preview.getVisibility() != vis) {
+            preview.setVisibility(vis);
+            previewTitle.setVisibility(vis);
+        }
+        if (b != null) preview.setImageBitmap(b);
+    }
+
+    /** Small (about half the width) or the whole width. */
+    private void sizePreview() {
+        int w = getResources().getDisplayMetrics().widthPixels;
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                previewBig ? LinearLayout.LayoutParams.MATCH_PARENT : (int) (w * 0.45f),
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        preview.setLayoutParams(lp);
     }
 
     private void update() {
