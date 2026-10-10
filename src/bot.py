@@ -1159,6 +1159,12 @@ def pan_camera(direction, amount=None):
 
 pan_fast = True   # quick drags; switched off for the rest of a level if a quick pan misreads
 pan_gain = 0.85   # board movement per px of finger movement (learned from measured long pans)
+pan_gain_samples = 0   # long pans it was learned from (this session)
+AMAZE_CUT_SHORT = 0.5  # Amaze: the camera stops dead at its limit (no overscroll and spring-back),
+                       # so a pan that moved less than this share of what pan_gain predicts ran into
+                       # it. Only once pan_gain was measured on a few full pans (a limit becomes a
+                       # board edge, and a wrong edge would mean a wrong tap).
+AMAZE_GAIN_SAMPLES = 2
 TOUCH_SLOP = 110  # px at the start of a drag the game ignores (real game: ~100, "often 100+")
 PAN_GAIN_MIN_DRAG = 500   # learn pan_gain only from drags this long (short ones are mostly slop)
 PAN_MAX_OVERSHOOT = 1.2   # a pan can't move the board further than this times the finger
@@ -2114,6 +2120,7 @@ class World:
 
     def register_pan(self, mask, direction, expected, sprang=False, board=None):
         """Measure the actual camera move by phase correlation against the pre-pan frame."""
+        global pan_gain, pan_gain_samples
         was_uncertain = self.pose_uncertain
         for d in direction.split("+"):              # an axis that moves is anchored again only by
             self.anchor["x" if d in ("LEFT", "RIGHT") else "y"] = False   # stopping at a known limit
@@ -2192,11 +2199,18 @@ class World:
             for d in sorted(sprang & set(comps) - stopped):
                 print(f"    [pan] view sprang back after the drag: reached the {d} limit")
                 stopped.add(d)    # moved, but the elastic border pulled it back: that's the limit
+        if AMAZE and response > 0.2 and not wrong_way and pan_gain_samples >= AMAZE_GAIN_SAMPLES:
+            for d in sorted(set(comps) - stopped):
+                predicted = pan_gain * max(0, abs(exp_of[d]) - TOUCH_SLOP)
+                if abs(exp_of[d]) >= PAN_GAIN_MIN_DRAG and abs(meas_of[d]) < AMAZE_CUT_SHORT * predicted:
+                    print(f"    [pan] moved {abs(meas_of[d]):.0f} of ~{predicted:.0f} px and stopped: "
+                          f"reached the {d} limit")
+                    stopped.add(d)
         if (response > 0.2 and not wrong_way and len(comps) == 1 and not stopped
                 and abs(exp_of[direction]) >= PAN_GAIN_MIN_DRAG and not self.pose_uncertain):
-            global pan_gain
             ratio = min(1.1, max(0.35, abs(meas_of[direction]) / abs(exp_of[direction])))
             pan_gain = 0.6 * pan_gain + 0.4 * ratio
+            pan_gain_samples += 1
         if response > 0.2 and not wrong_way and stopped:
             # Camera didn't move (or sprang back): it's at the pan limit, nothing more that way.
             for d in sorted(stopped):
