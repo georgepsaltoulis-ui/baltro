@@ -58,6 +58,24 @@ The app plays in one of two ways, and picks by itself:
   it because the capture shows only the Arrows app. If you choose *Entire screen* instead, the
   capture would show the black cover, so the screen stays on and the app tells you why.
 
+### Playing in the background
+
+With Wireless debugging on, turn on **Play in the background** in the app before *Start bot*. The
+game then runs on a hidden screen of its own: scrcpy's virtual display, which Android keeps unlocked
+and awake by itself. The bot watches and taps that screen over adb, so you can use the phone for
+anything else meanwhile, or turn its screen off. *Stop bot* closes the game with the hidden screen.
+
+- It needs Wireless debugging (an app can't make such a screen without adb). With the switch on and
+  Wireless debugging off, the bot doesn't start, and it never falls back to your own screen.
+- The bot sees the hidden screen through scrcpy's compressed video (the screen share only shows the
+  phone's own screen), so it relies on the brightness-based vision described above.
+- The hidden screen has no camera cutout or status bar. If the game lays out around them, its header
+  sits higher there: the bot finds the header wherever it is and shifts the spots it reads (lives,
+  "Hard") to match. In Amaze it also learns where the board's edge stops when the camera can't
+  scroll further.
+- Don't open the same game on your own screen while it plays in the background: Android would move
+  it there, and the bot would move it back.
+
 ### Wireless debugging (optional)
 
 It needs the phone to be on a Wi-Fi network, any network, with or without internet. Android only

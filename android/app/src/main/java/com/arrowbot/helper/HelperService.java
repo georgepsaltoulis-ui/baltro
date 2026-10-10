@@ -15,8 +15,11 @@ import android.os.HandlerThread;
 import android.os.Looper;
 import android.os.PowerManager;
 import android.os.SystemClock;
+import android.os.Build;
 import android.util.Log;
+import android.util.SparseArray;
 import android.view.Gravity;
+import android.view.KeyEvent;
 import android.view.View;
 import android.view.WindowManager;
 import android.view.accessibility.AccessibilityEvent;
@@ -193,16 +196,35 @@ public class HelperService extends AccessibilityService {
      *  video is compressed (thin lines and faint dots lose their colour in it) - else scrcpy over
      *  adb (or nothing). Touches and the screen-off still go through adb whenever it runs. */
     static FrameSource source() {
+        ScrcpyEngine e = ScrcpyEngine.current();
+        if (e != null && e.background) return e;    // background play: only scrcpy sees the hidden screen
+        HelperService h = instance;
+        if (h != null && Prefs.background(h)) return null;     // (and never the phone's own screen)
         CaptureService c = CaptureService.instance;
         if (c != null && c.alive()) return c;
-        return ScrcpyEngine.current();
+        return e;
     }
 
-    /** adb (scrcpy's video + touches) / capture+adb (screen share pictures, adb touches) /
-     *  capture (screen share + accessibility touches) / none. */
+    /** Background play is on: the game runs on scrcpy's hidden screen. */
+    static ScrcpyEngine hidden() {
+        ScrcpyEngine e = ScrcpyEngine.current();
+        return e != null && e.background ? e : null;
+    }
+
+    /** Background play chosen, but its hidden screen isn't running: nothing may touch the phone's
+     *  own screen meanwhile (it's the user's). */
+    private boolean backgroundDown() {
+        return Prefs.background(this) && hidden() == null;
+    }
+
+    private static final String BACKGROUND_DOWN = "ERR background play needs Wireless debugging (it's off)";
+
+    /** background (the game on scrcpy's hidden screen) / adb (scrcpy's video + touches) /
+     *  capture+adb (screen share pictures, adb touches) / capture (screen share + accessibility
+     *  touches) / none. */
     static String mode() {
         FrameSource s = source();
-        if (s instanceof ScrcpyEngine) return "adb";
+        if (s instanceof ScrcpyEngine) return ((ScrcpyEngine) s).background ? "background" : "adb";
         if (s != null) return ScrcpyEngine.current() != null ? "capture+adb" : "capture";
         return "none";
     }
@@ -224,7 +246,8 @@ public class HelperService extends AccessibilityService {
         captureStarting = true;
         new Thread(() -> {
             try {
-                if (ScrcpyEngine.ensure(this, msg -> CaptureService.setBotState(msg)) == null && !CaptureService.running()) {
+                if (ScrcpyEngine.ensure(this, msg -> CaptureService.setBotState(msg)) == null && !CaptureService.running()
+                        && !Prefs.background(this)) {       // (background play: never the phone's own screen)
                     Intent i = new Intent(this, MainActivity.class)
                             .putExtra(MainActivity.EXTRA_CAPTURE, true)
                             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
@@ -337,6 +360,7 @@ public class HelperService extends AccessibilityService {
                             }
                         }
                         case "TAP": {       // TAP x y hold_ms
+                            if (backgroundDown()) { send(out, BACKGROUND_DOWN); break; }
                             ScrcpyEngine e = ScrcpyEngine.current();
                             float[] k = e != null ? touchScale(e) : null;
                             boolean ok = e != null ? e.tap(f(a[1]) * k[0], f(a[2]) * k[1], l(a[3]))
@@ -345,6 +369,7 @@ public class HelperService extends AccessibilityService {
                             break;
                         }
                         case "DRAG": {      // DRAG x0 y0 x1 y1 move_ms hold_ms
+                            if (backgroundDown()) { send(out, BACKGROUND_DOWN); break; }
                             ScrcpyEngine e = ScrcpyEngine.current();
                             float[] k = e != null ? touchScale(e) : null;
                             boolean ok = e != null
@@ -354,6 +379,7 @@ public class HelperService extends AccessibilityService {
                             break;
                         }
                         case "PINCH": {     // PINCH ax0 ay0 bx0 by0 ax1 ay1 bx1 by1 ms
+                            if (backgroundDown()) { send(out, BACKGROUND_DOWN); break; }
                             ScrcpyEngine e = ScrcpyEngine.current();
                             float[] k = e != null ? touchScale(e) : null;
                             boolean ok = e != null
@@ -363,13 +389,26 @@ public class HelperService extends AccessibilityService {
                             send(out, ok ? "OK" : "ERR cancelled");
                             break;
                         }
-                        case "BACK":
-                            send(out, inTurn(() -> performGlobalAction(GLOBAL_ACTION_BACK)) ? "OK" : "ERR");
+                        case "BACK": {
+                            if (backgroundDown()) { send(out, BACKGROUND_DOWN); break; }
+                            ScrcpyEngine bg = hidden();     // (background play: Back on the hidden screen)
+                            boolean ok = bg != null ? bg.key(KeyEvent.KEYCODE_BACK)
+                                    : inTurn(() -> performGlobalAction(GLOBAL_ACTION_BACK));
+                            send(out, ok ? "OK" : "ERR");
                             break;
+                        }
                         case "HOME":
+                            if (hidden() != null || Prefs.background(this)) { send(out, "OK"); break; }  // (the user's home)
                             send(out, inTurn(() -> performGlobalAction(GLOBAL_ACTION_HOME)) ? "OK" : "ERR");
                             break;
-                        case "LAUNCH": {    // LAUNCH <package>
+                        case "LAUNCH": {    // LAUNCH <package> [restart]
+                            if (backgroundDown()) { send(out, BACKGROUND_DOWN); break; }
+                            ScrcpyEngine bg = hidden();     // background play: open it on the hidden screen
+                            if (bg != null) {
+                                boolean restart = a.length > 2 && a[2].equals("restart");
+                                send(out, bg.startApp(a[1], restart) ? "OK" : "ERR scrcpy stopped");
+                                break;
+                            }
                             Intent i = getPackageManager().getLaunchIntentForPackage(a[1]);
                             if (i == null) { send(out, "ERR not installed"); break; }
                             i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED);
@@ -377,13 +416,16 @@ public class HelperService extends AccessibilityService {
                             send(out, "OK");
                             break;
                         }
-                        case "FG":          // the app in front
-                            send(out, "OK " + foreground());
+                        case "FG": {        // the app in front (background play: on the hidden screen)
+                            ScrcpyEngine bg = hidden();
+                            send(out, "OK " + (bg != null ? foregroundOn(bg.displayId) : foreground()));
                             break;
+                        }
                         case "STATUSBAR":
-                            send(out, "OK " + (statusBarShowing() ? 1 : 0));
+                            send(out, "OK " + (hidden() == null && statusBarShowing() ? 1 : 0));
                             break;
                         case "AWAKE": {     // AWAKE 1|0: keep the screen on while this connection lasts
+                            if (hidden() != null) { send(out, "OK"); break; }   // (the hidden screen stays awake)
                             boolean on = a[1].equals("1");
                             if (on != keepOn) {
                                 keepOn = on;
@@ -395,6 +437,7 @@ public class HelperService extends AccessibilityService {
                         case "SCREEN": {    // SCREEN 0|1: screen off while this connection lasts (power button: on)
                             boolean off = a[1].equals("0");
                             if (off && !screenOff) {
+                                if (hidden() != null) { send(out, "OK on background"); break; }   // the user's screen
                                 if (!Prefs.screenOff(this)) { send(out, "OK on setting"); break; }
                                 if (userScreenAt > helloAt) { send(out, "OK on user"); break; }
                                 ScrcpyEngine e = ScrcpyEngine.current();
@@ -751,6 +794,22 @@ public class HelperService extends AccessibilityService {
         AccessibilityNodeInfo root = getRootInActiveWindow();
         if (root != null && root.getPackageName() != null) return root.getPackageName().toString();
         return lastPackage;
+    }
+
+    /** Background play: the app on the hidden screen (its topmost app window). If that can't be
+     *  read, the chosen game (better than relaunching it again and again). */
+    String foregroundOn(int displayId) {
+        String guess = Prefs.gamePackage(this);
+        if (displayId < 0 || Build.VERSION.SDK_INT < 30) return guess;
+        SparseArray<List<AccessibilityWindowInfo>> all = getWindowsOnAllDisplays();
+        List<AccessibilityWindowInfo> windows = all.get(displayId);
+        if (windows == null) return guess;
+        for (AccessibilityWindowInfo w : windows) {         // (top first)
+            if (w.getType() != AccessibilityWindowInfo.TYPE_APPLICATION) continue;
+            AccessibilityNodeInfo root = w.getRoot();
+            if (root != null && root.getPackageName() != null) return root.getPackageName().toString();
+        }
+        return windows.isEmpty() ? "none" : guess;
     }
 
     boolean statusBarShowing() {

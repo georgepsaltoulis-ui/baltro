@@ -99,6 +99,21 @@ public class MainActivity extends Activity {
         });
         box.addView(screenOff);
 
+        Switch background = new Switch(this);
+        background.setText("Play in the background (needs Wireless debugging, below): the game runs on a "
+                + "hidden screen of its own, so you can use the phone meanwhile - or turn the screen off. "
+                + "\"Stop bot\" closes it.");
+        background.setChecked(Prefs.background(this));
+        background.setPadding(0, pad / 2, 0, pad / 2);
+        background.setOnCheckedChangeListener((b, on) -> {
+            Prefs.setBackground(this, on);
+            screenOff.setEnabled(!on);              // (in the background the screen is yours anyway)
+            BotService.stop(this);                  // takes effect at the next Start
+            ScrcpyEngine.stopAll();
+        });
+        screenOff.setEnabled(!background.isChecked());
+        box.addView(background);
+
         start = button("▶  Start bot", v -> startBot());
         start.setTextSize(20);
         box.addView(start);
@@ -237,6 +252,25 @@ public class MainActivity extends Activity {
             startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
             return;
         }
+        if (Prefs.background(this)) {
+            // the game on scrcpy's hidden screen: adb only, no screen share (it shows the phone's screen)
+            start.setEnabled(false);
+            CaptureService.setBotState("looking for Wireless debugging");
+            new Thread(() -> {
+                ScrcpyEngine e = ScrcpyEngine.ensure(this, msg -> CaptureService.setBotState(msg));
+                if (e != null) e.startApp(Prefs.gamePackage(this), false);     // the game on the hidden screen
+                handler.post(() -> {
+                    start.setEnabled(true);
+                    if (e != null) {
+                        launchBot();
+                    } else {
+                        CaptureService.setBotState("not started: background play needs Wireless debugging "
+                                + "(on and paired, see below) - or turn \"Play in the background\" off");
+                    }
+                });
+            }, "start").start();
+            return;
+        }
         if (CaptureService.running()) {
             launchBot();
             return;
@@ -333,7 +367,8 @@ public class MainActivity extends Activity {
         boolean waiting = Approvals.pending != null;
         String mode = HelperService.mode();
         status.setText("Accessibility:  " + (HelperService.instance != null ? "ON" : "off  <- turn it on (below)")
-                + "\nLive picture:   " + (mode.equals("adb") ? "scrcpy over adb (compressed video)"
+                + "\nLive picture:   " + (mode.equals("background") ? "the hidden screen (background play)"
+                        : mode.equals("adb") ? "scrcpy over adb (compressed video)"
                         : mode.equals("capture+adb") ? "screen share (exact), taps through adb"
                         : mode.equals("capture") ? "screen capture" : "off (on at Start)")
                 + "\nWireless debug: " + Adb.status

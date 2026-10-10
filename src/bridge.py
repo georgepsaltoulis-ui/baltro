@@ -231,8 +231,9 @@ class Helper:
     def home(self):
         self.call("HOME")
 
-    def launch(self, package):
-        self.call("LAUNCH", package)
+    def launch(self, package, restart=False):
+        """Open the game (background play: on the hidden screen; restart = close it first)."""
+        self.call("LAUNCH", package, *(["restart"] if restart else []))
 
     def foreground(self):
         return self.call("FG")

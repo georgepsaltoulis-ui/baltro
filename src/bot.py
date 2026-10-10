@@ -695,6 +695,8 @@ def bridge_screen_off():
         print("[*] Screen off while the bot plays (the game keeps running). Press the power button to turn it on.")
     elif reply.startswith("OK on setting"):
         print("[*] The screen stays on while the bot plays (ArrowBot's setting).")
+    elif reply.startswith("OK on background"):
+        print("[*] Playing in the background on a hidden screen: the phone's screen is yours.")
     elif not reply.startswith("OK"):
         print(f"[-] The screen stays on: {reply[4:] if reply.startswith('ERR ') else reply}")
 
@@ -728,7 +730,10 @@ def start_scrcpy():
             link = bridge.HelperLink(helper, max_fps=SCRCPY_FPS, log=print).start()
             link_video = True
             mode, _ = helper.mode()
+            globals()["BACKGROUND"] = mode == "background"
             print(f"[+] Live picture {link.size[0]}x{link.size[1]}: " + (
+                "the game's hidden screen (background play: the phone is yours meanwhile), taps through "
+                "scrcpy" if mode == "background" else
                 "scrcpy over the app's adb (Wireless debugging), taps through scrcpy (compressed video: "
                 "start the bot from the app's Start button to share the screen instead)" if mode == "adb" else
                 "the screen share (exact), taps through scrcpy over the app's adb" if mode == "capture+adb" else
@@ -1150,9 +1155,10 @@ def pan_camera(direction, amount=None):
         if AMAZE:
             # Short enough that a pan can only reach the camera limit if the board's edge was already
             # in view (then the edge measures the move exactly; on plain dots nothing else could)
-            room = {"LEFT": AMAZE_LIMIT_X - ROI_X1, "RIGHT": ROI_X2 - 1 - AMAZE_LIMIT_X,
-                    "TOP": AMAZE_LIMIT_Y - (ROI_Y1 + (b1 + 1 if b1 >= b0 else 0)),
-                    "BOTTOM": ROI_Y2 - 1 - AMAZE_LIMIT_Y}[d]
+            room = {"LEFT": amaze_limit_line("LEFT") - ROI_X1, "RIGHT": ROI_X2 - 1 - amaze_limit_line("RIGHT"),
+                    "TOP": amaze_limit_line("TOP") - (ROI_Y1 + (b1 + 1 if b1 >= b0 else 0)),
+                    "BOTTOM": ROI_Y2 - 1 - amaze_limit_line("BOTTOM")}[d]
+            room = int(room)
             want[d] = max(40, min(want[d], room - AMAZE_EDGE_ROOM))
         reach[d] = int(0.9 * ((ROI_X2 - ROI_X1) - 2 * 60)) if vx else int(0.9 * (ROI_Y2 - (ROI_Y1 + b1 + 1)))
     # The board moves only part of the way the finger goes (learned from measured pans): drag
@@ -1208,9 +1214,19 @@ def amaze_learn_gain(finger, moved):
         del amaze_gain_samples[:-6]
         amaze_gain = float(np.median(amaze_gain_samples))
 
-def amaze_edge_state(board, d):
-    """Amaze: the board's `d` edge in this view - "at" the camera limit (on the centre line), "away"
-    from it, or None (not in view)."""
+amaze_limit_seen = {}    # Amaze: where the board's edge sat at each camera limit, as seen (screen px)
+
+def amaze_limit_line(d):
+    """Amaze: where the board's `d` edge sits (screen px) with the camera at that limit - as seen
+    at a limit, else the phone's measured centre line. (On the hidden screen of background play
+    there's no camera cutout: if the game keeps its header clear of one, the board's area - and its
+    centre, half as much - sit higher there; the header's measured offset says how much.)"""
+    if d in amaze_limit_seen:
+        return amaze_limit_seen[d]
+    return AMAZE_LIMIT_X if d in ("LEFT", "RIGHT") else AMAZE_LIMIT_Y + hud_dy / 2.0
+
+def amaze_board_side(board, d):
+    """The board's `d` side in this view (ROI px; header excluded), or None if it isn't in view."""
     if board is None:
         return None
     m = board.copy()
@@ -1224,9 +1240,30 @@ def amaze_edge_state(board, d):
     v = {"LEFT": bb[0], "TOP": bb[1], "RIGHT": bb[2], "BOTTOM": bb[3]}[d]
     inside = {"LEFT": v > EDGE_MARGIN, "RIGHT": v < w - 1 - EDGE_MARGIN,
               "TOP": v > (b1 + 1 if b1 >= b0 else 0) + EDGE_MARGIN, "BOTTOM": v < h - 1 - EDGE_MARGIN}[d]
-    if not inside:
+    return v if inside else None
+
+def amaze_learn_limit(board, d):
+    """The camera stopped at its `d` limit with the board's edge in view: that's where the edge
+    sits at that limit (kept if it's near the expected line: a stuck drag mustn't teach nonsense)."""
+    v = amaze_board_side(board, d)
+    if v is None:
+        return
+    v += ROI_X1 if d in ("LEFT", "RIGHT") else ROI_Y1
+    default = AMAZE_LIMIT_X if d in ("LEFT", "RIGHT") else AMAZE_LIMIT_Y + hud_dy / 2.0
+    if abs(v - default) > 80:
+        return
+    old = amaze_limit_seen.get(d)
+    if old is None or abs(old - v) > 6:
+        print(f"    [pan] the board's {d} edge stops at {v:.0f} px on screen (the camera's {d} limit)")
+    amaze_limit_seen[d] = float(v)
+
+def amaze_edge_state(board, d):
+    """Amaze: the board's `d` edge in this view - "at" the camera limit (on the centre line), "away"
+    from it, or None (not in view)."""
+    v = amaze_board_side(board, d)
+    if v is None:
         return None
-    line = AMAZE_LIMIT_X - ROI_X1 if d in ("LEFT", "RIGHT") else AMAZE_LIMIT_Y - ROI_Y1
+    line = amaze_limit_line(d) - (ROI_X1 if d in ("LEFT", "RIGHT") else ROI_Y1)
     return "at" if abs(v - line) <= 25 else "away"
 
 def expected_move(finger):
@@ -1379,6 +1416,13 @@ def load_ingame_markers():
     return [m for m in markers if m["pos"] is not None]
 
 _hud_cache = {"crops": None, "found": 0, "t": 0.0}
+BACKGROUND = False         # background play: the game on the app's hidden screen (set at connect)
+# The level's header (HUD) as found vs where it sits on the phone: on the hidden screen there's
+# no camera cutout or status bar, and games that keep clear of them sit higher there. Measured
+# from the HUD markers; the other spots in the header (lives, "Hard") follow it.
+hud_dy = 0
+HUD_SEARCH_EXTRA = 110     # background play: look this much further up/down until it's measured
+hud_measured = False
 
 def count_ingame_markers(frame, markers, under_popup=False):
     """
@@ -1388,7 +1432,7 @@ def count_ingame_markers(frame, markers, under_popup=False):
     (a few cheap pixel diffs instead of template matching every frame); re-checked once a second.
     """
     if not under_popup:
-        crops = [frame[m["pos"][1]:m["pos"][1] + m["img"].shape[0],
+        crops = [frame[max(0, m["pos"][1] + hud_dy):m["pos"][1] + hud_dy + m["img"].shape[0],
                        m["pos"][0]:m["pos"][0] + m["img"].shape[1]] for m in markers]
         old, now = _hud_cache["crops"], time.time()
         if (old is not None and len(old) == len(crops) and now - _hud_cache["t"] < 1.0
@@ -1401,17 +1445,28 @@ def count_ingame_markers(frame, markers, under_popup=False):
     return _count_markers(frame, markers, True)
 
 def _count_markers(frame, markers, under_popup):
+    global hud_dy, hud_measured
     lo, hi = (0.25, 1.25) if under_popup else BRIGHTNESS_RANGE
     threshold = 0.8 if under_popup else INGAME_THRESHOLD
-    found = 0
+    found, offsets = 0, []
     for m in markers:
         x, y = m["pos"]
+        y += hud_dy
         th, tw = m["img"].shape[:2]
         M = INGAME_SEARCH_MARGIN
-        region = frame[max(0, y - M):y + th + M, max(0, x - M):x + tw + M]
-        score, _, ratio = match_in(region, m["img"])
+        My = M + (HUD_SEARCH_EXTRA if BACKGROUND and not hud_measured else 0)
+        y0, x0 = max(0, y - My), max(0, x - M)
+        region = frame[y0:y + th + My, x0:x + tw + M]
+        score, loc, ratio = match_in(region, m["img"])
         if score >= threshold and lo <= ratio <= hi:
             found += 1
+            offsets.append(y0 + loc[1] - m["pos"][1])
+    if not under_popup and found >= INGAME_MIN_MARKERS and offsets:
+        dy = int(round(float(np.median(offsets))))
+        if abs(dy - hud_dy) > 3:
+            print(f"    [hud] the level's header sits {dy:+d} px from where it does on the phone's own screen")
+            hud_dy = dy
+        hud_measured = True
     return found
 
 def find_button(frame, buttons):
@@ -2384,9 +2439,12 @@ class World:
                 stopped.add(d)    # moved, but the elastic border pulled it back: that's the limit
         if AMAZE and len(comps) == 1 and board is not None:
             # at the limit the board's edge is on the centre line; anywhere else it isn't
-            # (or the board's edge was in view before and after and didn't move)
-            stopped = {direction} if (amaze_edge_state(board, direction) == "at"
-                                      or (es is not None and abs(es) < LIMIT_MAX_MOVE)) else set()
+            # (or the board's edge was in view before and after and didn't move: then that's
+            # where it sits at this limit - learned, for the hidden screen of background play)
+            edge_static = es is not None and abs(es) < LIMIT_MAX_MOVE
+            if edge_static:
+                amaze_learn_limit(board, direction)
+            stopped = {direction} if (amaze_edge_state(board, direction) == "at" or edge_static) else set()
         elif AMAZE and response > 0.2 and not wrong_way and pan_gain_samples >= AMAZE_GAIN_SAMPLES:
             for d in sorted(set(comps) - stopped):
                 predicted = pan_gain * max(0, abs(exp_of[d]) - TOUCH_SLOP)
@@ -2481,7 +2539,7 @@ class World:
             if b1 >= b0:
                 m[b0:b1 + 1] = 0
             bb = board_bbox(m)
-            lx, ly = AMAZE_LIMIT_X - ROI_X1, AMAZE_LIMIT_Y - ROI_Y1
+            lx, ly = amaze_limit_line("LEFT") - ROI_X1, amaze_limit_line("TOP") - ROI_Y1
             placed = set()
             for d, axis in (("TOP", "y"), ("LEFT", "x"), ("BOTTOM", "y"), ("RIGHT", "x")):
                 if bb is None or axis in placed or amaze_edge_state(board, d) is None:
@@ -2789,10 +2847,10 @@ def level_target_seconds(waves):
 def level_kind(frame):
     """The tag on the level header: none = normal, magenta "HARD LEVEL", red "SUPER HARD"."""
     if AMAZE:   # a purple "Hard" under the title
-        hsv = cv2.cvtColor(frame[228:272, 470:620], cv2.COLOR_BGR2HSV)
+        hsv = cv2.cvtColor(frame[228 + hud_dy:272 + hud_dy, 470:620], cv2.COLOR_BGR2HSV)
         purple = (hsv[:, :, 0] >= 120) & (hsv[:, :, 0] <= 160) & (hsv[:, :, 1] > 80)
         return "hard" if np.count_nonzero(purple) > 150 else "normal"
-    hsv = cv2.cvtColor(frame[105:165, 50:290], cv2.COLOR_BGR2HSV)
+    hsv = cv2.cvtColor(frame[105 + hud_dy:165 + hud_dy, 50:290], cv2.COLOR_BGR2HSV)
     lit = (hsv[:, :, 1] > 120) & (hsv[:, :, 2] > 120)
     if np.count_nonzero(lit) < 300:
         return "normal"
@@ -3662,6 +3720,13 @@ def choose_pan(results, world, mask_shape, skip=lambda wx, wy, d: False):
 # -----------------------------------------------------------------------------
 def restart_game():
     print(f"[!] No progress for {STUCK_TIMEOUT}s. Restarting {GAME_PACKAGE}...")
+    if BRIDGE_MODE and BACKGROUND:     # the hidden screen: scrcpy closes it and opens it again
+        try:
+            helper.launch(GAME_PACKAGE, restart=True)
+        except Exception as e:
+            print(f"[-] Couldn't restart {GAME_PACKAGE}: {e}")
+        time.sleep(RESTART_LOAD_WAIT)
+        return
     if BRIDGE_MODE:                # (an app can't close another one: home screen, then open it again)
         try:
             helper.home()
@@ -3680,18 +3745,18 @@ def progress_fill(frame):
     """How full the green level-progress bar in the header is (0..1); it fills as arrows clear."""
     if AMAZE:
         return 0.0      # no progress bar (an empty board is what tells the level is done)
-    hsv = cv2.cvtColor(frame[240:265, 400:680], cv2.COLOR_BGR2HSV)
+    hsv = cv2.cvtColor(frame[240 + hud_dy:265 + hud_dy, 400:680], cv2.COLOR_BGR2HSV)
     green = (hsv[:, :, 0] > 35) & (hsv[:, :, 0] < 85) & (hsv[:, :, 1] > 100) & (hsv[:, :, 2] > 120)
     return min(1.0, int(green.any(axis=0).sum()) / 222.0)
 
 def count_stars(frame):
     """Lit stars in the level header (each mistake costs one)."""
     if AMAZE:   # lives: blue drops (a lost one turns grey)
-        hsv = cv2.cvtColor(frame[350:440, 40:330], cv2.COLOR_BGR2HSV)
+        hsv = cv2.cvtColor(frame[350 + hud_dy:440 + hud_dy, 40:330], cv2.COLOR_BGR2HSV)
         blue = cv2.inRange(hsv, (95, 120, 150), (115, 255, 255))
         n, _, st, _ = cv2.connectedComponentsWithStats(blue)
         return int(np.count_nonzero(st[1:, cv2.CC_STAT_AREA] > 800))
-    hsv = cv2.cvtColor(frame[150:240, 410:680], cv2.COLOR_BGR2HSV)
+    hsv = cv2.cvtColor(frame[150 + hud_dy:240 + hud_dy, 410:680], cv2.COLOR_BGR2HSV)
     yellow = (hsv[:, :, 0] >= 18) & (hsv[:, :, 0] <= 35) & (hsv[:, :, 1] > 120) & (hsv[:, :, 2] > 180)
     return min(3, int(round(yellow.sum() / 2250)))
 

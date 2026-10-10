@@ -33,6 +33,16 @@ final class Prefs {
         return ARROWS.equals(gamePackage(c)) ? "arrows" : "amaze";
     }
 
+    /** Play in the background: the game on a hidden screen (needs Wireless debugging), the phone
+     *  free meanwhile. */
+    static boolean background(Context c) {
+        return c.getSharedPreferences(FILE, Context.MODE_PRIVATE).getBoolean("background", false);
+    }
+
+    static void setBackground(Context c, boolean on) {
+        c.getSharedPreferences(FILE, Context.MODE_PRIVATE).edit().putBoolean("background", on).apply();
+    }
+
     static void setScreenOff(Context c, boolean off) {
         c.getSharedPreferences(FILE, Context.MODE_PRIVATE).edit().putBoolean("screen_off", off).apply();
     }

@@ -2,6 +2,7 @@ package com.arrowbot.helper;
 
 import android.content.Context;
 import android.graphics.Rect;
+import android.hardware.display.DisplayManager;
 import android.media.Image;
 import android.media.MediaCodec;
 import android.media.MediaCodecInfo;
@@ -10,7 +11,9 @@ import android.os.Build;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.SystemClock;
+import android.util.DisplayMetrics;
 import android.util.Log;
+import android.view.Display;
 
 import java.io.BufferedInputStream;
 import java.io.ByteArrayOutputStream;
@@ -21,6 +24,7 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.Random;
 import java.util.concurrent.ExecutorService;
@@ -31,6 +35,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import com.flyfishxu.kadb.stream.AdbStream;
 
@@ -50,7 +56,11 @@ final class ScrcpyEngine implements FrameSource {
     static final String SERVER_ASSET = "bot/Scrcpy/scrcpy-server";
     static final String REMOTE = "/data/local/tmp/arrowbot-scrcpy-server.jar";
     static final int MAX_FPS = 60, BIT_RATE = 8_000_000;
-    private static final int MSG_INJECT_TOUCH = 2, MSG_SET_DISPLAY_POWER = 10;
+    /** Background play: the hidden screen's video, a little sharper (nothing else is encoding). */
+    static final int BACKGROUND_BIT_RATE = 12_000_000;
+    private static final int MSG_INJECT_KEYCODE = 0, MSG_INJECT_TOUCH = 2, MSG_SET_DISPLAY_POWER = 10,
+            MSG_START_APP = 16;
+    private static final Pattern NEW_DISPLAY = Pattern.compile("New display: .*\\(id=(\\d+)\\)");
     private static final int DOWN = 0, UP = 1, MOVE = 2;
     private static final long FINGER = -2;      // POINTER_GENERIC_FINGER
     /** No bot holds it and nobody used it (no frames asked for, no taps) for this long: stopped
@@ -88,9 +98,33 @@ final class ScrcpyEngine implements FrameSource {
     private long seq = 0, frontNs = 0;
     private volatile long lastFrameAt = SystemClock.uptimeMillis();
 
-    private ScrcpyEngine(Context c, Adb adb) {
+    /** Background play: the game runs on a hidden screen of its own (scrcpy's new virtual display,
+     *  never locked and kept active), streamed and tapped like the real one, so the phone itself
+     *  stays free (and can even be turned off). Otherwise: the phone's own screen. */
+    final boolean background;
+    /** The hidden screen: "WxH/dpi" (the phone's screen scaled to 1080 wide, same layout). */
+    private final String hiddenScreen;
+    /** Its display id (from the server's log), -1 until known. */
+    volatile int displayId = -1;
+
+    private ScrcpyEngine(Context c, Adb adb, boolean background) {
         this.context = c.getApplicationContext();
         this.adb = adb;
+        this.background = background;
+        this.hiddenScreen = background ? hiddenScreenSize(c) : null;
+    }
+
+    /** The phone's screen at 1080 px wide (the bot's working size), portrait, with the density
+     *  scaled the same way: the game lays out exactly as on the phone, just smaller. */
+    static String hiddenScreenSize(Context c) {
+        DisplayMetrics m = new DisplayMetrics();
+        Display d = c.getSystemService(DisplayManager.class).getDisplay(Display.DEFAULT_DISPLAY);
+        d.getRealMetrics(m);
+        int pw = Math.min(m.widthPixels, m.heightPixels), ph = Math.max(m.widthPixels, m.heightPixels);
+        int w = Math.min(pw, 1080);
+        int h = Math.round(ph * (float) w / pw / 8f) * 8;
+        int dpi = Math.max(120, Math.round(m.densityDpi * (float) w / pw));
+        return w + "x" + h + "/" + dpi;
     }
 
     static ScrcpyEngine current() {
@@ -101,8 +135,10 @@ final class ScrcpyEngine implements FrameSource {
     /** scrcpy over adb, started if needed. Null: no adb here (Wireless debugging off / not paired;
      *  see status) or it didn't start - then the app uses Android's screen capture instead. */
     static synchronized ScrcpyEngine ensure(Context c, Consumer<String> say) {
+        boolean background = Prefs.background(c);
         ScrcpyEngine e = current();
-        if (e != null) return e;
+        if (e != null && e.background == background) return e;
+        if (e != null) e.stop(background ? "restarting for background play" : "restarting on the screen");
         try {
             Adb adb = Adb.get(c);
             if (!adb.connectAny(say)) {
@@ -110,10 +146,11 @@ final class ScrcpyEngine implements FrameSource {
                 return null;
             }
             say.accept("Starting the live picture over adb...");
-            e = new ScrcpyEngine(c, adb);
+            e = new ScrcpyEngine(c, adb, background);
             e.start();
             instance = e;
-            status = "on (" + e.videoW + "x" + e.videoH + ", " + MAX_FPS + " fps)";
+            status = (background ? "on, hidden screen " : "on (") + e.videoW + "x" + e.videoH + ", " + MAX_FPS + " fps"
+                    + (background ? "" : ")");
             return e;
         } catch (Exception ex) {
             Log.w(TAG, "scrcpy over adb", ex);
@@ -150,8 +187,12 @@ final class ScrcpyEngine implements FrameSource {
         String name = String.format("scrcpy_%08x", scid);
         server = adb.open("shell:CLASSPATH=" + REMOTE + " app_process / com.genymobile.scrcpy.Server " + VERSION
                 + String.format(" scid=%08x", scid) + " log_level=info tunnel_forward=true audio=false control=true"
-                + " video_codec=h264 max_fps=" + MAX_FPS + " video_bit_rate=" + BIT_RATE
-                + " send_device_meta=false send_dummy_byte=false clipboard_autosync=false cleanup=true");
+                + " video_codec=h264 max_fps=" + MAX_FPS + " video_bit_rate=" + (background ? BACKGROUND_BIT_RATE : BIT_RATE)
+                + " send_device_meta=false send_dummy_byte=false clipboard_autosync=false cleanup=true"
+                // the hidden screen: no status/navigation bar, kept awake while the phone sleeps, and
+                // the phone's own screen left alone
+                + (background ? " new_display=" + hiddenScreen + " vd_system_decorations=false keep_active=true"
+                        + " power_on=false" : ""));
         alive = true;
         thread("scrcpy-log", this::serverLog);
 
@@ -247,6 +288,8 @@ final class ScrcpyEngine implements FrameSource {
                     line.reset();
                     Log.i(TAG, "[scrcpy-server] " + text);
                     if (text.contains("ERROR")) status = "scrcpy: " + text;
+                    Matcher nd = NEW_DISPLAY.matcher(text);
+                    if (nd.find()) displayId = Integer.parseInt(nd.group(1));
                 }
             }
         } catch (IOException ignored) {
@@ -602,12 +645,38 @@ final class ScrcpyEngine implements FrameSource {
      *  and streaming). Off: the power button turns it back on. */
     boolean displayPower(boolean on) {
         lastUse = SystemClock.uptimeMillis();
+        if (background) return true;        // (the phone's own screen is the user's)
         try {
             send(new byte[]{(byte) MSG_SET_DISPLAY_POWER, (byte) (on ? 1 : 0)});
             return true;
         } catch (IOException e) {
             return false;
         }
+    }
+
+    /** Open an app on the screen scrcpy shows (background play: the hidden one); restart = close
+     *  it first (scrcpy's "--start-app=+package"). */
+    boolean startApp(String pkg, boolean restart) {
+        byte[] name = ((restart ? "+" : "") + pkg).getBytes(StandardCharsets.UTF_8);
+        if (name.length > 255) return false;
+        ByteBuffer m = ByteBuffer.allocate(2 + name.length);
+        m.put((byte) MSG_START_APP).put((byte) name.length).put(name);
+        return inTurn(() -> {
+            send(m.array());
+            return null;
+        });
+    }
+
+    /** A key press (down + up) on the screen scrcpy shows, e.g. KeyEvent.KEYCODE_BACK. */
+    boolean key(int keycode) {
+        return inTurn(() -> {
+            for (int action = 0; action <= 1; action++) {      // KeyEvent.ACTION_DOWN, ACTION_UP
+                ByteBuffer m = ByteBuffer.allocate(14).order(ByteOrder.BIG_ENDIAN);
+                m.put((byte) MSG_INJECT_KEYCODE).put((byte) action).putInt(keycode).putInt(0).putInt(0);
+                send(m.array());
+            }
+            return null;
+        });
     }
 
     private static String hex(byte[] b) {
