@@ -92,7 +92,7 @@ public class BotService extends Service {
             new File(dir, "Temp").mkdirs();
             if (!Python.isStarted()) Python.start(new AndroidPlatform(this));
             Python.getInstance().getModule("app_main").callAttr("run", dir.getAbsolutePath(),
-                    Approvals.builtinToken(this), getPackageName());
+                    Approvals.builtinToken(this), getPackageName(), Prefs.game(this));
         } catch (Throwable t) {
             StringWriter sw = new StringWriter();
             t.printStackTrace(new PrintWriter(sw));

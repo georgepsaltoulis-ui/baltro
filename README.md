@@ -1,6 +1,7 @@
 # ArrowBot
 
-Plays the Android game "Arrows" (`com.arrow.out`). `ArrowBot.py` is the whole bot in one file; it
+Plays the Android games "Arrows" (`com.arrow.out`) and "Amaze GO!" (`com.oakever.arrows`), the same
+kind of puzzle: tap the arrows whose way out is clear. `ArrowBot.py` is the whole bot in one file; it
 unpacks itself into `ArrowBot_files/` on the first run. It runs on a computer with the phone on USB,
 or on the phone itself with no computer.
 
@@ -25,7 +26,7 @@ only needed to download it.
 2. **Turn it on, once.** Open *ArrowBot*, tap *Turn on in Accessibility*, and turn on *ArrowBot*.
    If Android says the setting is restricted, go to Settings > Apps > ArrowBot, open the menu at the
    top right, tap *Allow restricted settings*, and try again.
-3. **Tap "Start bot".** If Wireless debugging is on (see below), the bot uses it and nothing is
+3. **Pick the game** (*Arrows* or *Amaze GO!*) and **tap "Start bot".** If Wireless debugging is on (see below), the bot uses it and nothing is
    asked. Otherwise Android asks to allow screen capture, every time the bot starts: choose
    **A single app**, then **Arrows**, and tap *Start*.
 
@@ -152,6 +153,20 @@ internet, so there are two ways round it:
   `python ArrowBot.py --no-wifi-setup` on the computer. Then unplug it and start the bot in Termux
   on the phone. It connects without Wi-Fi until the phone restarts. The phone asks
   "Allow USB debugging?" once; tap Allow.
+
+## Amaze GO!
+
+Same solver as for Arrows. Only the look differs (dark lines on a light board), along with the
+buttons and the package. The bot:
+
+- zooms out at the start of each level, a pinch at a time, until the whole board is on screen
+  (Amaze lets you zoom out much further than needed; past that, the arrows get too small to read);
+- taps *Play* / *Hard*, *Next Level* (orange or purple), *Continue* on the daily streak, and
+  **Restart** when out of lives (never the "Continue" that gives more lives);
+- counts the blue drops as lives, and doesn't tap an arrow again that cost one.
+
+In the app, choose *Amaze GO!* above *Start bot*. On a computer or in Termux:
+`python ArrowBot.py --game amaze`.
 
 ## On a computer (Windows)
 

@@ -6,6 +6,7 @@ the phone itself with no computer at all (see ON THE PHONE below).
     python ArrowBot.py             start (asks whether to show the phone screen on this PC)
     python ArrowBot.py --show      start and show the phone screen in a window (view only)
     python ArrowBot.py --no-show   start without the window
+    python ArrowBot.py --game amaze   play Amaze GO! (com.oakever.arrows) instead of Arrows
     --allow-helper                 allow the uiautomator2 helper on the phone without asking
     --on-phone                     run on the phone itself (found by itself in Android's Terminal app)
     --no-wifi-setup                on the computer, phone on USB: lets the bot on the phone connect
@@ -396,6 +397,10 @@ def _helper_permission(adb, devices, allowed_by_flag):
 
 def main():
     args = sys.argv[1:]
+    if "--game" in args[:-1]:                       # --game amaze: Amaze GO! instead of Arrows
+        i = args.index("--game")
+        os.environ["ARROWBOT_GAME"] = args[i + 1]   # (seen by the bot)
+        args = args[:i] + args[i + 2:]
     if any(a not in ("--show", "--no-show", "--allow-helper", "--on-phone", "--no-wifi-setup") for a in args):
         print(__doc__)
         return

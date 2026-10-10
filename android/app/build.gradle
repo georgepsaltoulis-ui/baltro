@@ -69,7 +69,8 @@ dependencies {
 // when Wireless debugging is available; not the PC launcher or scrcpy's Windows files)
 def copyBot = tasks.register("copyBot", Copy) {
     from("$rootDir/../src") {
-        include "bot.py", "onphone.py", "bridge.py", "buttons/**", "ingame/**", "Scrcpy/scrcpy-server"
+        include "bot.py", "onphone.py", "bridge.py", "buttons/**", "ingame/**", "buttons_amaze/**",
+                "ingame_amaze/**", "Scrcpy/scrcpy-server"
     }
     into "$buildDir/botassets/bot"
 }

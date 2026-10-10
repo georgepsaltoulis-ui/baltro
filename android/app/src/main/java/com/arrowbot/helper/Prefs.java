@@ -11,6 +11,15 @@ final class Prefs {
         return c.getSharedPreferences(FILE, Context.MODE_PRIVATE).getBoolean("screen_off", true);
     }
 
+    /** Which game the bot plays: "arrows" (Arrows) or "amaze" (Amaze GO!). */
+    static String game(Context c) {
+        return c.getSharedPreferences(FILE, Context.MODE_PRIVATE).getString("game", "arrows");
+    }
+
+    static void setGame(Context c, String game) {
+        c.getSharedPreferences(FILE, Context.MODE_PRIVATE).edit().putString("game", game).apply();
+    }
+
     static void setScreenOff(Context c, boolean off) {
         c.getSharedPreferences(FILE, Context.MODE_PRIVATE).edit().putBoolean("screen_off", off).apply();
     }

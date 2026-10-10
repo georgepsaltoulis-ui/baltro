@@ -17,6 +17,8 @@ import android.text.InputType;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.LinearLayout;
+import android.widget.RadioButton;
+import android.widget.RadioGroup;
 import android.widget.ScrollView;
 import android.widget.Switch;
 import android.widget.TextView;
@@ -65,7 +67,8 @@ public class MainActivity extends Activity {
         box.addView(title);
 
         TextView about = new TextView(this);
-        about.setText("Plays Arrows on this phone: no computer needed.\n\n"
+        about.setText("Plays Arrows or Amaze GO! on this phone: no computer needed. Pick the game below "
+                + "(it applies at the next start).\n\n"
                 + "Once: tap \"Turn on in Accessibility\" and turn \"ArrowBot\" on. If Android says the "
                 + "setting is restricted: Settings > Apps > ArrowBot > ⋮ (top right) > Allow restricted "
                 + "settings, then try again.\n\n"
@@ -77,6 +80,24 @@ public class MainActivity extends Activity {
                 + "choose \"A single app\" > Arrows (with \"Entire screen\" the screen has to stay on).");
         about.setPadding(0, pad, 0, pad);
         box.addView(about);
+
+        TextView gameTitle = new TextView(this);
+        gameTitle.setText("Game:");
+        gameTitle.setTypeface(Typeface.DEFAULT_BOLD);
+        box.addView(gameTitle);
+        RadioGroup games = new RadioGroup(this);
+        games.setOrientation(RadioGroup.HORIZONTAL);
+        String[][] choices = {{"arrows", "Arrows"}, {"amaze", "Amaze GO!"}};
+        for (int i = 0; i < choices.length; i++) {
+            RadioButton r = new RadioButton(this);
+            r.setId(100 + i);
+            r.setText(choices[i][1]);
+            r.setPadding(0, 0, pad, 0);
+            games.addView(r);
+            if (choices[i][0].equals(Prefs.game(this))) r.setChecked(true);
+        }
+        games.setOnCheckedChangeListener((g, id) -> Prefs.setGame(this, choices[id - 100][0]));
+        box.addView(games);
 
         Switch screenOff = new Switch(this);
         screenOff.setText("Screen off while the bot plays (the power button turns it back on). Off: the "

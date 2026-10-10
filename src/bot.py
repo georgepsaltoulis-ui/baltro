@@ -122,7 +122,14 @@ FOREGROUND_CHECK_INTERVAL = 5  # seconds between "is the game still the open app
 DIRS = {"RIGHT": (1, 0), "LEFT": (-1, 0), "BOTTOM": (0, 1), "TOP": (0, -1)}
 OPPOSITE = {"LEFT": "RIGHT", "RIGHT": "LEFT", "TOP": "BOTTOM", "BOTTOM": "TOP"}
 
-GAME_PACKAGE = "com.arrow.out"
+# Which game: "arrows" (Arrows, com.arrow.out) or "amaze" (Amaze GO!, com.oakever.arrows): the same
+# puzzle - tap the arrows whose path out is clear - drawn differently (dark lines on a light board,
+# its own buttons). Chosen with --game amaze or ARROWBOT_GAME=amaze (the ArrowBot app sets it).
+if "--game" in sys.argv[:-1]:
+    os.environ["ARROWBOT_GAME"] = sys.argv[sys.argv.index("--game") + 1]
+GAME = os.environ.get("ARROWBOT_GAME", "arrows").strip().lower()
+AMAZE = GAME == "amaze"
+GAME_PACKAGE = "com.oakever.arrows" if AMAZE else "com.arrow.out"
 SCREENSHOT_TIMEOUT = 5   # seconds before a hung screenshot is abandoned
 CAPTURE_THREADS = 2      # screenshots taken in parallel (more fresh frames per second)
 USE_SCRCPY = True        # live video + taps through scrcpy (./Scrcpy); falls back to screenshots
@@ -1210,12 +1217,13 @@ def zoom_out():
     # (shows the system bars / triggers back).
     cx, cy = (ROI_X1 + ROI_X2) // 2, (ROI_Y1 + ROI_Y2) // 2
     spread_x, spread_y = 340, 500
+    end_x, end_y = (170, 250) if AMAZE else (40, 40)   # Amaze: ~2x per pinch (it zooms out a lot)
     if tapper: tapper.clear()
     # uiautomator2 pinch first: the scrcpy pinch often stopped short of the zoom limit
     if grabber: grabber.pause()
     try:
         ok = None if BRIDGE_MODE else device_call(lambda: d().gesture((cx - spread_x, cy - spread_y), (cx + spread_x, cy + spread_y),
-                                             (cx - 40, cy - 40), (cx + 40, cy + 40), steps=30) or True,
+                                             (cx - end_x, cy - end_y), (cx + end_x, cy + end_y), steps=30) or True,
                          GESTURE_TIMEOUT, "Zoom gesture")   # True = done (gesture() returns None)
     except Exception as e:
         print(f"    [zoom] uiautomator2 pinch failed ({e})")
@@ -1228,7 +1236,7 @@ def zoom_out():
         vw, vh = link.size
         fx, fy = vw / SCREEN_W, vh / SCREEN_H
         link.pinch(((cx - spread_x) * fx, (cy - spread_y) * fy), ((cx + spread_x) * fx, (cy + spread_y) * fy),
-                   ((cx - 40) * fx, (cy - 40) * fy), ((cx + 40) * fx, (cy + 40) * fy))
+                   ((cx - end_x) * fx, (cy - end_y) * fy), ((cx + end_x) * fx, (cy + end_y) * fy))
         print("    [zoom] used the scrcpy pinch instead")
     except Exception as e:
         print(f"    [zoom] scrcpy pinch failed too ({e})")
@@ -1251,6 +1259,18 @@ BUTTON_SCALE = 0.5        # buttons are searched on a half-size frame for speed
 BUTTON_SIZES = (0.88, 1.0, 1.12)   # PLAY/NEXT pulse in size, so match a few sizes
 BUTTON_BRIGHTNESS = (0.7, 1.5)     # ...and a shine sweeps across them
 BRIGHTNESS_RANGE = (0.8, 1.25)
+PREFERRED_BUTTONS = ()             # tapped first when they show with others
+
+# Amaze GO!: its own HUD and buttons, a smaller header (title, lives, hint), nothing at the bottom
+if AMAZE:
+    INGAME_DIR = os.path.join(HERE, "ingame_amaze")
+    BUTTONS_DIR = os.path.join(HERE, "buttons_amaze")
+    HEADER_BAND = STATUS_BAR_BAND = (0, 445)
+    ROI_Y2 = 2400
+    PREFERRED_BUTTONS = ("restart",)   # out of lives: Restart, not "Continue" (an ad for lives)
+AMAZE_ZOOM_MIN_HALF = 2.0   # Amaze zooms out much further than needed: stop before lines get thinner
+                            # than this (arrowheads must stay recognisable)
+AMAZE_ZOOM_MAX_PINCHES = 8
 
 def load_templates(folder):
     templates = []
@@ -1324,6 +1344,11 @@ def find_button(frame, buttons):
     Coarse-to-fine: a quick grayscale search on a quarter-size frame finds where each button
     might be, then the strict color check runs at half size only in a small window there.
     """
+    if PREFERRED_BUTTONS:
+        first = [b for b in buttons if b["name"].startswith(PREFERRED_BUTTONS)]
+        hit = find_button(frame, first) if first and len(first) < len(buttons) else None
+        if hit is not None:
+            return hit
     small = cv2.resize(frame, None, fx=BUTTON_SCALE, fy=BUTTON_SCALE, interpolation=cv2.INTER_AREA)
     tiny = cv2.cvtColor(cv2.resize(small, None, fx=0.5, fy=0.5, interpolation=cv2.INTER_AREA),
                         cv2.COLOR_BGR2GRAY)
@@ -1389,9 +1414,15 @@ def build_masks(roi_bgr, hsv=None, keep=None):
     """Line mask + board mask. keep (dict): also stores the line blobs' labels/stats for reuse."""
     if hsv is None:
         hsv = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2HSV)
-    v = cv2.extractChannel(hsv, 2)
-    _, line_mask = cv2.threshold(v, LINE_V_THRESH, 255, cv2.THRESH_BINARY)
-    _, board = cv2.threshold(v, BOARD_V_THRESH, 255, cv2.THRESH_BINARY)
+    if AMAZE:
+        # dark brown lines (red after a bounce) on a pale beige board; the grid dots are a pale tan
+        line_mask = cv2.bitwise_or(cv2.inRange(hsv, (0, 90, 0), (30, 255, 234)),
+                                   cv2.inRange(hsv, (160, 90, 0), (180, 255, 234)))
+        board = cv2.bitwise_or(cv2.inRange(hsv, (0, 45, 60), (30, 255, 255)), line_mask)
+    else:
+        v = cv2.extractChannel(hsv, 2)
+        _, line_mask = cv2.threshold(v, LINE_V_THRESH, 255, cv2.THRESH_BINARY)
+        _, board = cv2.threshold(v, BOARD_V_THRESH, 255, cv2.THRESH_BINARY)
     board = cv2.morphologyEx(board, cv2.MORPH_OPEN, np.ones((2, 2), np.uint8))
     b0, b1 = band_rows()
     line_mask[b0:b1 + 1] = 0   # the header is drawn here; what's behind it is unknown, not empty
@@ -1427,12 +1458,18 @@ def build_masks(roi_bgr, hsv=None, keep=None):
         keep["labels"], keep["stats"] = labels, stats
     return line_mask, board
 
+def still_mask(hsv):
+    """Pixels that aren't an arrow flying out (in Arrows they tint blue: saturated, not red; in
+    Amaze GO! they keep their colour, and recent taps are tracked by their lanes instead)."""
+    if AMAZE:
+        return np.full(hsv.shape[:2], 255, np.uint8)
+    return cv2.bitwise_not(cv2.inRange(hsv, (11, SOLID_MAX_SAT + 1, LINE_V_THRESH), (169, 255, 255)))
+
 def resting_only(mask, hsv):
-    """Line mask without arrows that are flying out (they tint blue: saturated, not red).
+    """Line mask without arrows that are flying out.
     Flying arrows are gone a moment later, so they must not go on the map, into pan measurements
     or into "has the view stopped moving" checks."""
-    flying = cv2.inRange(hsv, (11, SOLID_MAX_SAT + 1, LINE_V_THRESH), (169, 255, 255))
-    return cv2.bitwise_and(mask, cv2.bitwise_not(flying))
+    return cv2.bitwise_and(mask, still_mask(hsv))
 
 def resting_line_mask(frame):
     roi = frame[ROI_Y1:ROI_Y2, ROI_X1:ROI_X2]
@@ -1510,6 +1547,8 @@ def is_solid_head(hsv, cx, cy):
         return False
     mid = patch[k // 2].astype(float) if k % 2 else (patch[k // 2 - 1].astype(float) + patch[k // 2]) / 2
     h, s, v = (float(c) for c in mid)    # per-channel medians (one sort instead of three)
+    if AMAZE:   # brown at rest, red after a bounce; a fading arrow goes pale
+        return s >= 80 and (h <= 30 or h >= 160)
     if (h <= 10 or h >= 170) and s >= 120 and v >= 150:
         return True                                   # red: bounced earlier, resting
     return s <= SOLID_MAX_SAT and v >= SOLID_MIN_VAL  # lavender: resting
@@ -2518,6 +2557,10 @@ def level_target_seconds(waves):
 
 def level_kind(frame):
     """The tag on the level header: none = normal, magenta "HARD LEVEL", red "SUPER HARD"."""
+    if AMAZE:   # a purple "Hard" under the title
+        hsv = cv2.cvtColor(frame[228:272, 470:620], cv2.COLOR_BGR2HSV)
+        purple = (hsv[:, :, 0] >= 120) & (hsv[:, :, 0] <= 160) & (hsv[:, :, 1] > 80)
+        return "hard" if np.count_nonzero(purple) > 150 else "normal"
     hsv = cv2.cvtColor(frame[105:165, 50:290], cv2.COLOR_BGR2HSV)
     lit = (hsv[:, :, 1] > 120) & (hsv[:, :, 2] > 120)
     if np.count_nonzero(lit) < 300:
@@ -2792,7 +2835,7 @@ def analyze(frame, world):
         step = measure_grid_step(board, mask)
         if step is not None:
             world.grid_step = step
-    still = cv2.bitwise_not(cv2.inRange(hsv, (11, SOLID_MAX_SAT + 1, LINE_V_THRESH), (169, 255, 255)))
+    still = still_mask(hsv)
     resting = cv2.bitwise_and(mask, still)
     board = cv2.bitwise_and(board, still)   # an arrow flying off past the edge isn't more board
     # line thickness only changes with zoom: measure it now and then, not every frame
@@ -3398,12 +3441,19 @@ def restart_game():
 
 def progress_fill(frame):
     """How full the green level-progress bar in the header is (0..1); it fills as arrows clear."""
+    if AMAZE:
+        return 0.0      # no progress bar (an empty board is what tells the level is done)
     hsv = cv2.cvtColor(frame[240:265, 400:680], cv2.COLOR_BGR2HSV)
     green = (hsv[:, :, 0] > 35) & (hsv[:, :, 0] < 85) & (hsv[:, :, 1] > 100) & (hsv[:, :, 2] > 120)
     return min(1.0, int(green.any(axis=0).sum()) / 222.0)
 
 def count_stars(frame):
     """Lit stars in the level header (each mistake costs one)."""
+    if AMAZE:   # lives: blue drops (a lost one turns grey)
+        hsv = cv2.cvtColor(frame[350:440, 40:330], cv2.COLOR_BGR2HSV)
+        blue = cv2.inRange(hsv, (95, 120, 150), (115, 255, 255))
+        n, _, st, _ = cv2.connectedComponentsWithStats(blue)
+        return int(np.count_nonzero(st[1:, cv2.CC_STAT_AREA] > 800))
     hsv = cv2.cvtColor(frame[150:240, 410:680], cv2.COLOR_BGR2HSV)
     yellow = (hsv[:, :, 0] >= 18) & (hsv[:, :, 0] <= 35) & (hsv[:, :, 1] > 120) & (hsv[:, :, 2] > 180)
     return min(3, int(round(yellow.sum() / 2250)))
@@ -3537,8 +3587,10 @@ def board_fits_view():
     mask, board = build_masks(roi)
     bb = board_bbox(board)
     step = measure_grid_step(board, mask)
-    if bb is None or step is None:
+    if bb is None or (step is None and not AMAZE):
         return False
+    if step is None:    # Amaze shows grid dots only where lines have gone: ~1.2 cells from the lines
+        step = 11 * line_half_thickness(mask, cv2.distanceTransform(mask, cv2.DIST_L2, 5))
     h, w = mask.shape
     em = max(EDGE_MARGIN, int(step + 1))
     b0, b1 = band_rows()
@@ -3566,6 +3618,9 @@ def full_zoom_out(level_seen=None):
     if board_fits_view():
         print("[*] The whole board is already on screen: no zoom needed.")
         return
+    if AMAZE:
+        amaze_zoom_out(level_seen)
+        return
     print("[*] Zooming out to view full puzzle...")
     before = current_line_half()
     if level_seen is not None:
@@ -3584,6 +3639,36 @@ def full_zoom_out(level_seen=None):
             return   # already at this level's limit (some levels stop at 5, not 4) / nothing to gain
         print(f"    [zoom] pinch ignored (lines still {after:.1f}), retrying...")
         time.sleep(0.25)                    # probably the level intro; wait it out
+
+def amaze_zoom_out(level_seen=None):
+    """Amaze GO! zooms out much further than Arrows, a pinch at a time: pinch (gently) until the
+    whole board is on screen, the lines stop getting thinner, or they get too thin to read."""
+    print("[*] Zooming out to view full puzzle...")
+    if level_seen is not None:
+        time.sleep(max(0.0, ZOOM_INTRO_WAIT - (time.time() - level_seen)))
+    before = current_line_half()
+    ignored = 0
+    for attempt in range(AMAZE_ZOOM_MAX_PINCHES):
+        if before is not None and before <= AMAZE_ZOOM_MIN_HALF:
+            print(f"    [zoom] lines {before:.1f}: as far out as they stay readable")
+            return
+        zoom_out()
+        after = _wait_thinner(before)
+        wait_until_settled()
+        if before is None or after is None:
+            return
+        if after < before - 0.25:
+            print(f"    [zoom] lines {before:.1f} -> {after:.1f}")
+            ignored = 0
+            if board_fits_view():
+                return
+        else:
+            ignored += 1
+            if ignored >= 2:
+                return      # the game's limit
+            print(f"    [zoom] pinch ignored (lines still {after:.1f}), retrying...")
+            time.sleep(0.25)
+        before = after
 
 def sprang_back(world, first_mask, settled_mask, expected):
     """True if the view slid BACK after the finger lifted: the game's elastic border pulling an
@@ -3625,7 +3710,7 @@ def pan_and_register(world, direction, amount=None):
         roi = frame[ROI_Y1:ROI_Y2, ROI_X1:ROI_X2]
         hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
         lines, board = build_masks(roi, hsv)
-        still = cv2.bitwise_not(cv2.inRange(hsv, (11, SOLID_MAX_SAT + 1, LINE_V_THRESH), (169, 255, 255)))
+        still = still_mask(hsv)
         pmask = cv2.bitwise_and(lines, still)
         pboard = cv2.bitwise_and(board, still)
         sprang = sprang_back(world, settle_first_mask, pmask, expected)
