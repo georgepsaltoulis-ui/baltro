@@ -123,6 +123,12 @@ public class MainActivity extends Activity {
         logTitle.setText("\nWhat the bot says:");
         logTitle.setTypeface(Typeface.DEFAULT_BOLD);
         box.addView(logTitle);
+        box.addView(button("Copy the bot's log (to paste in a chat)", v -> {
+            android.content.ClipboardManager cb = getSystemService(android.content.ClipboardManager.class);
+            cb.setPrimaryClip(android.content.ClipData.newPlainText("ArrowBot log",
+                    tail(BotService.logFile(this), 60_000)));
+            android.widget.Toast.makeText(this, "Copied the bot's log", android.widget.Toast.LENGTH_SHORT).show();
+        }));
         log = new TextView(this);
         log.setTypeface(Typeface.MONOSPACE);
         log.setTextSize(11);

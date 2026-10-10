@@ -3660,34 +3660,46 @@ def full_zoom_out(level_seen=None):
         print(f"    [zoom] pinch ignored (lines still {after:.1f}), retrying...")
         time.sleep(0.25)                    # probably the level intro; wait it out
 
+amaze_limit_half = None   # Amaze GO!: line thickness at this level's zoom limit (once found)
+
 def amaze_zoom_out(level_seen=None):
-    """Amaze GO! zooms out much further than Arrows, a pinch at a time: pinch (gently) until the
-    whole board is on screen, the lines stop getting thinner, or they get too thin to read."""
+    """Amaze GO!: pinch (gently) until the whole board is on screen or the lines would get too thin
+    to read. At its zoom limit the game lets the board shrink under the fingers and then snaps it
+    back: so a pinch is judged only once the view has settled again - lines no thinner = the limit
+    (stop there; measuring mid-pinch read every snap-back as a zoom that worked, and re-zoomed)."""
     print("[*] Zooming out to view full puzzle...")
     if level_seen is not None:
         time.sleep(max(0.0, ZOOM_INTRO_WAIT - (time.time() - level_seen)))
+    global amaze_limit_half
     before = current_line_half()
-    ignored = 0
+    if before is not None and amaze_limit_half is not None and before <= amaze_limit_half + 0.4:
+        print(f"    [zoom] lines {before:.1f}: already at this level's zoom limit, no pinch")
+        return
     for attempt in range(AMAZE_ZOOM_MAX_PINCHES):
-        if before is not None and before <= AMAZE_ZOOM_MIN_HALF:
+        if before is None:
+            return
+        if before <= AMAZE_ZOOM_MIN_HALF:
             print(f"    [zoom] lines {before:.1f}: as far out as they stay readable")
+            amaze_limit_half = before
             return
         zoom_out()
-        after = _wait_thinner(before)
         wait_until_settled()
-        if before is None or after is None:
+        time.sleep(0.3)                     # a snap-back can start a moment after the fingers lift
+        wait_until_settled()
+        after = current_line_half()
+        if after is None:
             return
-        if after < before - 0.25:
-            print(f"    [zoom] lines {before:.1f} -> {after:.1f}")
-            ignored = 0
-            if board_fits_view():
-                return
-        else:
-            ignored += 1
-            if ignored >= 2:
-                return      # the game's limit
-            print(f"    [zoom] pinch ignored (lines still {after:.1f}), retrying...")
-            time.sleep(0.25)
+        if after >= before - 0.25:
+            if attempt == 0 and level_seen is not None and time.time() - level_seen < 3.0:
+                print(f"    [zoom] no change (lines {after:.1f}); the level may still be appearing, once more")
+                time.sleep(0.5)
+                continue
+            print(f"    [zoom] lines still {after:.1f} after the pinch: the game's zoom limit")
+            amaze_limit_half = after
+            return
+        print(f"    [zoom] lines {before:.1f} -> {after:.1f}")
+        if board_fits_view():
+            return
         before = after
 
 def sprang_back(world, first_mask, settled_mask, expected):
@@ -3979,6 +3991,7 @@ def run_solver(deadline=None):
         if needs_zoom:
             if not rezoom_same_level:
                 recorder.start(frame)
+                globals()["amaze_limit_half"] = None   # a new level: its zoom limit isn't known yet
             globals()["pan_fast"] = True
             full_zoom_out(None if rezoom_same_level else level_seen_at)
             level_half = current_line_half()
@@ -4414,6 +4427,7 @@ def run_solver(deadline=None):
                 if now_half is not None and level_half is not None and now_half > level_half + 0.25:
                     print(f"[*] Zoom drifted (lines {level_half:.1f} -> {now_half:.1f}). Re-zooming.")
                     full_zoom_out()
+                    level_half = current_line_half() or level_half
                     world.reset(keep_level=True)
                 elif not stuck_soft_done:
                     # First time: forget camera limits and chase attempts (cheap; keeps the map)
