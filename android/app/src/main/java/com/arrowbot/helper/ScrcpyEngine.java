@@ -106,6 +106,8 @@ final class ScrcpyEngine implements FrameSource {
     private final String hiddenScreen;
     /** Its display id (from the server's log), -1 until known. */
     volatile int displayId = -1;
+    /** The server's last log line (said when it doesn't start). */
+    private volatile String lastServerLine = "";
 
     private ScrcpyEngine(Context c, Adb adb, boolean background) {
         this.context = c.getApplicationContext();
@@ -216,10 +218,24 @@ final class ScrcpyEngine implements FrameSource {
         thread("scrcpy-video", this::readVideo);
         thread("scrcpy-control", this::drainControl);
         thread("scrcpy-idle", this::idleWatch);
+        // The hidden screen shows nothing - and so sends no picture - until an app runs on it: open
+        // the game there now (again every few seconds until it shows: a cold start takes a while).
+        long until = SystemClock.uptimeMillis() + (background ? 20_000 : 8000), nextOpen = 0;
+        while (true) {
+            if (background && SystemClock.uptimeMillis() >= nextOpen) {
+                startApp(Prefs.gamePackage(context), false);
+                nextOpen = SystemClock.uptimeMillis() + 5000;
+            }
+            synchronized (lock) {
+                if (seq != 0 || !alive || SystemClock.uptimeMillis() >= until) break;
+                lock.wait(200);
+            }
+        }
         synchronized (lock) {
-            long until = SystemClock.uptimeMillis() + 8000;
-            while (seq == 0 && alive && SystemClock.uptimeMillis() < until) lock.wait(200);
-            if (seq == 0) throw new IOException(alive ? "no picture from scrcpy" : "scrcpy stopped");
+            if (seq == 0) {
+                String why = alive ? "no picture from scrcpy" : "scrcpy stopped";
+                throw new IOException(lastServerLine.isEmpty() ? why : why + "; it said: " + lastServerLine);
+            }
         }
     }
 
@@ -287,6 +303,7 @@ final class ScrcpyEngine implements FrameSource {
                     String text = line.toString("UTF-8").trim();
                     line.reset();
                     Log.i(TAG, "[scrcpy-server] " + text);
+                    if (!text.isEmpty()) lastServerLine = text.length() > 160 ? text.substring(0, 160) : text;
                     if (text.contains("ERROR")) status = "scrcpy: " + text;
                     Matcher nd = NEW_DISPLAY.matcher(text);
                     if (nd.find()) displayId = Integer.parseInt(nd.group(1));

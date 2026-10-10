@@ -297,7 +297,6 @@ public class MainActivity extends Activity {
             CaptureService.setBotState("looking for Wireless debugging");
             new Thread(() -> {
                 ScrcpyEngine e = ScrcpyEngine.ensure(this, msg -> CaptureService.setBotState(msg));
-                if (e != null) e.startApp(Prefs.gamePackage(this), false);     // the game on the hidden screen
                 handler.post(() -> {
                     start.setEnabled(true);
                     if (e != null) {
