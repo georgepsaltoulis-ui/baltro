@@ -15,7 +15,7 @@ One app with the bot inside. You don't need Termux, Wi-Fi, a hotspot or a comput
 only needed to download it.
 
 1. **Install it.** In the phone's browser, open
-   https://github.com/georgepsaltoulis-ui/baltro/raw/HEAD/ArrowBot.apk and install it (43 MB, for
+   https://github.com/georgepsaltoulis-ui/baltro/raw/HEAD/ArrowBot.apk and install it (44 MB, for
    64-bit phones such as Pixels).
    - Allow your browser to install apps if Android asks.
    - If Play Protect warns, tap *Install anyway*. It's a sideloaded app that uses accessibility.
@@ -169,8 +169,9 @@ The bot is in `src/`:
 After editing, run `python build.py` to pack them into `ArrowBot.py` again.
 
 The app is in `android/`: the Java part plus `app/src/main/python/app_main.py`. It takes the bot's
-files from `src/` when it's built. It needs the Android SDK (platform 35) and Python 3.10 on the
-build machine:
+files from `src/` when it's built. Its adb client is [Kadb](https://github.com/flyfishxu/Kadb)
+(Maven Central). Building it needs the Android SDK (platform `android-37.0`) and Python 3.10 on
+the build machine:
 
 ```sh
 cd android

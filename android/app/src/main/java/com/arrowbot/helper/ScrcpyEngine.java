@@ -32,7 +32,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 
-import io.github.muntashirakon.adb.AdbStream;
+import com.flyfishxu.kadb.stream.AdbStream;
 
 /**
  * What ArrowBot.py does with scrcpy on a computer, done inside the app over adb (Adb): scrcpy's
@@ -148,7 +148,7 @@ final class ScrcpyEngine implements FrameSource {
 
         int scid = new Random().nextInt(0x7FFFFFFF);
         String name = String.format("scrcpy_%08x", scid);
-        server = adb.openStream("shell:CLASSPATH=" + REMOTE + " app_process / com.genymobile.scrcpy.Server " + VERSION
+        server = adb.open("shell:CLASSPATH=" + REMOTE + " app_process / com.genymobile.scrcpy.Server " + VERSION
                 + String.format(" scid=%08x", scid) + " log_level=info tunnel_forward=true audio=false control=true"
                 + " video_codec=h264 max_fps=" + MAX_FPS + " video_bit_rate=" + BIT_RATE
                 + " send_device_meta=false send_dummy_byte=false clipboard_autosync=false cleanup=true");
@@ -160,14 +160,14 @@ final class ScrcpyEngine implements FrameSource {
         Thread.sleep(300);
         while (video == null) {
             try {
-                video = adb.openStream("localabstract:" + name);
+                video = adb.open("localabstract:" + name);
             } catch (IOException e) {
-                if (SystemClock.uptimeMillis() > end || server.isClosed()) throw new IOException("scrcpy's server didn't start");
+                if (SystemClock.uptimeMillis() > end || !alive) throw new IOException("scrcpy's server didn't start");
                 Thread.sleep(100);
             }
         }
-        control = adb.openStream("localabstract:" + name);
-        controlOut = control.openOutputStream();
+        control = adb.open("localabstract:" + name);
+        controlOut = control.getSink().outputStream();
 
         codecThread = new HandlerThread("decoder");
         codecThread.start();
@@ -233,7 +233,7 @@ final class ScrcpyEngine implements FrameSource {
 
     private void serverLog() {
         AdbStream s = server;
-        try (InputStream in = s.openInputStream()) {
+        try (InputStream in = s.getSource().inputStream()) {
             ByteArrayOutputStream line = new ByteArrayOutputStream();
             byte[] buf = new byte[4096];
             int n;
@@ -258,13 +258,14 @@ final class ScrcpyEngine implements FrameSource {
     }
 
     private void drainControl() {
-        try (InputStream in = control.openInputStream()) {
+        try (InputStream in = control.getSource().inputStream()) {
             byte[] buf = new byte[4096];
             while (alive && in.read(buf) >= 0) {
                 // device messages (clipboard, acks): not used, just never let them pile up
             }
         } catch (IOException ignored) {
         }
+        if (alive) stop("scrcpy's control connection ended");     // (no more taps possible)
     }
 
     private void idleWatch() {
@@ -287,7 +288,7 @@ final class ScrcpyEngine implements FrameSource {
      *  each capture start / rotation, and media packets (8-byte PTS with config/key flags, 4-byte
      *  size, the encoder's output). */
     private void readVideo() {
-        try (DataInputStream in = new DataInputStream(new BufferedInputStream(video.openInputStream(), 1 << 16))) {
+        try (DataInputStream in = new DataInputStream(new BufferedInputStream(video.getSource().inputStream(), 1 << 16))) {
             int codecId = in.readInt();
             if (codecId != 0x68323634) throw new IOException("not H.264: " + Integer.toHexString(codecId));
             byte[] packet = new byte[1 << 20];
