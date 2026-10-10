@@ -26,7 +26,8 @@ only needed to download it.
 2. **Turn it on, once.** Open *ArrowBot*, tap *Turn on in Accessibility*, and turn on *ArrowBot*.
    If Android says the setting is restricted, go to Settings > Apps > ArrowBot, open the menu at the
    top right, tap *Allow restricted settings*, and try again.
-3. **Pick the game** (*Arrows* or *Amaze GO!*) and **tap "Start bot".** If Wireless debugging is on (see below), the bot uses it and nothing is
+3. **Choose the game** (tap *Game:* — every app on the phone is listed, Arrows and Amaze GO! first)
+   and **tap "Start bot".** If Wireless debugging is on (see below), the bot uses it and nothing is
    asked. Otherwise Android asks to allow screen capture, every time the bot starts: choose
    **A single app**, then **Arrows**, and tap *Start*.
 
@@ -167,6 +168,10 @@ buttons and the package. The bot:
 
 In the app, choose *Amaze GO!* above *Start bot*. On a computer or in Termux:
 `python ArrowBot.py --game amaze`.
+
+Any other app can be chosen too (`--package <app id>` on a computer): the bot opens it and reads
+it like Amaze GO! (dark lines on a light board), so it works for look-alikes of Amaze GO! with
+the same buttons. Each button also has a purple version, in case a game or a level uses that.
 
 ## On a computer (Windows)
 

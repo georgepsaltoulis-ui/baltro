@@ -30,9 +30,9 @@ class _Log:
         return False
 
 
-def run(bot_dir, token, package, game="arrows"):
+def run(bot_dir, token, package, game="arrows", game_package=""):
     os.environ.update(ARROWBOT_ON_PHONE="1", ARROWBOT_BRIDGE="1", ARROWBOT_HELPER_TOKEN=token,
-                      ARROWBOT_APP_PACKAGE=package, ARROWBOT_GAME=game)
+                      ARROWBOT_APP_PACKAGE=package, ARROWBOT_GAME=game, ARROWBOT_GAME_PACKAGE=game_package)
     os.makedirs(os.path.join(bot_dir, "Temp"), exist_ok=True)
     sys.stdout = sys.stderr = _Log(os.path.join(bot_dir, "Temp", "app.log"), sys.stdout)
     sys.path.insert(0, bot_dir)

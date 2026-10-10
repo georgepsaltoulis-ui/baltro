@@ -11,13 +11,26 @@ final class Prefs {
         return c.getSharedPreferences(FILE, Context.MODE_PRIVATE).getBoolean("screen_off", true);
     }
 
-    /** Which game the bot plays: "arrows" (Arrows) or "amaze" (Amaze GO!). */
-    static String game(Context c) {
-        return c.getSharedPreferences(FILE, Context.MODE_PRIVATE).getString("game", "arrows");
+    static final String ARROWS = "com.arrow.out";
+
+    /** The app the bot plays (any app on the phone; Arrows unless chosen). */
+    static String gamePackage(Context c) {
+        return c.getSharedPreferences(FILE, Context.MODE_PRIVATE).getString("game_package", ARROWS);
     }
 
-    static void setGame(Context c, String game) {
-        c.getSharedPreferences(FILE, Context.MODE_PRIVATE).edit().putString("game", game).apply();
+    static String gameLabel(Context c) {
+        return c.getSharedPreferences(FILE, Context.MODE_PRIVATE).getString("game_label", "Arrows");
+    }
+
+    static void setGame(Context c, String pkg, String label) {
+        c.getSharedPreferences(FILE, Context.MODE_PRIVATE).edit()
+                .putString("game_package", pkg).putString("game_label", label).apply();
+    }
+
+    /** How the bot reads it: "arrows" (Arrows' look) or "amaze" (Amaze GO!'s: dark lines on a light
+     *  board - for every other game). */
+    static String game(Context c) {
+        return ARROWS.equals(gamePackage(c)) ? "arrows" : "amaze";
     }
 
     static void setScreenOff(Context c, boolean off) {

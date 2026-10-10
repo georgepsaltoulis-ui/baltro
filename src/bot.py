@@ -125,11 +125,17 @@ OPPOSITE = {"LEFT": "RIGHT", "RIGHT": "LEFT", "TOP": "BOTTOM", "BOTTOM": "TOP"}
 # Which game: "arrows" (Arrows, com.arrow.out) or "amaze" (Amaze GO!, com.oakever.arrows): the same
 # puzzle - tap the arrows whose path out is clear - drawn differently (dark lines on a light board,
 # its own buttons). Chosen with --game amaze or ARROWBOT_GAME=amaze (the ArrowBot app sets it).
+# Any other app can be played with --package <app id> (ARROWBOT_GAME_PACKAGE): it gets Amaze GO!'s look
+# unless it's Arrows itself.
 if "--game" in sys.argv[:-1]:
     os.environ["ARROWBOT_GAME"] = sys.argv[sys.argv.index("--game") + 1]
-GAME = os.environ.get("ARROWBOT_GAME", "arrows").strip().lower()
+if "--package" in sys.argv[:-1]:
+    os.environ["ARROWBOT_GAME_PACKAGE"] = sys.argv[sys.argv.index("--package") + 1]
+_package = os.environ.get("ARROWBOT_GAME_PACKAGE", "").strip()
+GAME = os.environ.get("ARROWBOT_GAME", "").strip().lower() or (
+    "amaze" if _package and _package != "com.arrow.out" else "arrows")
 AMAZE = GAME == "amaze"
-GAME_PACKAGE = "com.oakever.arrows" if AMAZE else "com.arrow.out"
+GAME_PACKAGE = _package or ("com.oakever.arrows" if AMAZE else "com.arrow.out")
 SCREENSHOT_TIMEOUT = 5   # seconds before a hung screenshot is abandoned
 CAPTURE_THREADS = 2      # screenshots taken in parallel (more fresh frames per second)
 USE_SCRCPY = True        # live video + taps through scrcpy (./Scrcpy); falls back to screenshots
