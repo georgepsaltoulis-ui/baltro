@@ -7,7 +7,9 @@ or on the phone itself with no computer.
 The phone's screen goes off while the bot plays, and the game keeps running. Press the power button
 to turn the screen back on; it then stays on until the bot stops. When the bot stops, the screen
 comes back on and the phone's normal screen timeout is put back. To keep the screen on the whole
-time, set `SCREEN_OFF = False` in `src/bot.py`.
+time, turn off **Screen off while the bot plays** in the ArrowBot app, above *Start bot*. Turning
+it off while the bot plays turns the screen on right away. On a computer, set `SCREEN_OFF = False`
+in `src/bot.py`.
 
 ## On the phone: just the ArrowBot app (recommended)
 
@@ -59,10 +61,12 @@ Once:
 1. Settings > System > Developer options > turn on **Wireless debugging**. (Developer options:
    Settings > About phone > tap *Build number* 7 times.)
 2. In ArrowBot, tap **Pair with Wireless debugging**. Settings opens.
-3. Tap **Wireless debugging**, then **Pair device with pairing code**.
-4. Pull down the notifications and type that code into ArrowBot's notification. The pairing box in
-   Settings has to stay open while you do this; that's why the code goes into the notification.
-   In split screen, you can type it into the app instead.
+3. Tap **Wireless debugging**, then **Pair device with pairing code**, and leave that box open.
+   ArrowBot reads the code and port from it and pairs by itself, within a second or two. This
+   needs ArrowBot turned on in Accessibility. Don't switch apps: the box closes and its code
+   changes.
+4. If it doesn't pair by itself, pull down the notifications and type the code into ArrowBot's
+   notification, still with the box open. In split screen, you can type it into the app instead.
 
 After that, *Start bot* uses it by itself whenever Wireless debugging is on. The app's screen shows
 which way it's playing (*Live picture: scrcpy over adb* or *screen capture*).

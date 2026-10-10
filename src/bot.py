@@ -677,6 +677,8 @@ def bridge_screen_off():
     reply = helper.screen(False)
     if reply.startswith("OK off"):
         print("[*] Screen off while the bot plays (the game keeps running). Press the power button to turn it on.")
+    elif reply.startswith("OK on setting"):
+        print("[*] The screen stays on while the bot plays (ArrowBot's setting).")
     elif not reply.startswith("OK"):
         print(f"[-] The screen stays on: {reply[4:] if reply.startswith('ERR ') else reply}")
 

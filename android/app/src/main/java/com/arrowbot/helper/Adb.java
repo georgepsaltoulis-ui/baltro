@@ -350,13 +350,28 @@ final class Adb {
             host = found.get(0).getHost();
             port = found.get(0).getPort();
         }
-        final String h = host, c = code;
-        final int p = port;
+        String error = pairWith(code, host, port);
+        if (error == UNREACHABLE) error = "the pairing box's port didn't answer";
+        return error == null ? null : "Pairing didn't work (" + error + "). Check the code and try again.";
+    }
+
+    /** pairWith's answer when nothing answered at that address (try another one). */
+    static final String UNREACHABLE = "unreachable";
+
+    /** Pair with Wireless debugging's pairing box at host:port. Null: paired; UNREACHABLE: nothing
+     *  answered there; else what went wrong. */
+    synchronized String pairWith(String code, String host, int port) {
         try {
             BuildersKt.runBlocking(EmptyCoroutineContext.INSTANCE,
-                    (scope, cont) -> Kadb.Companion.pair(h, p, c, "ArrowBot", (Continuation) cont));
+                    (scope, cont) -> Kadb.Companion.pair(host, port, code, "ArrowBot", (Continuation) cont));
         } catch (Exception e) {
-            return "Pairing didn't work (" + e.getMessage() + "). Check the code and try again.";
+            for (Throwable t = e; t != null; t = t.getCause()) {
+                if (t instanceof java.net.ConnectException || t instanceof java.net.NoRouteToHostException) {
+                    return UNREACHABLE;
+                }
+            }
+            Log.i(TAG, "pair " + host + ":" + port + ": " + e);
+            return e.getMessage() != null ? e.getMessage() : e.toString();
         }
         markPaired();
         status = "paired";

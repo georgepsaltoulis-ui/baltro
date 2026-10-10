@@ -33,6 +33,7 @@ import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -84,6 +85,9 @@ public class HelperService extends AccessibilityService {
      *  void (nothing of theirs to undo). */
     private static volatile int screenEpoch = 0;
     private static volatile boolean captureStarting = false;
+    /** Until when (uptime ms) Settings' pairing box is looked for (the user tapped "Pair"). */
+    private static volatile long pairingUntil = 0;
+    private boolean pairWatching = false;
 
     private final BroadcastReceiver screenEvents = new BroadcastReceiver() {
         @Override
@@ -369,6 +373,7 @@ public class HelperService extends AccessibilityService {
                         case "SCREEN": {    // SCREEN 0|1: screen off while this connection lasts (power button: on)
                             boolean off = a[1].equals("0");
                             if (off && !screenOff) {
+                                if (!Prefs.screenOff(this)) { send(out, "OK on setting"); break; }
                                 if (userScreenAt > helloAt) { send(out, "OK on user"); break; }
                                 ScrcpyEngine e = ScrcpyEngine.current();
                                 if (e != null) {            // adb: the panel itself off (like scrcpy on a computer)
@@ -524,6 +529,83 @@ public class HelperService extends AccessibilityService {
             }
         }
         return blackView != null;
+    }
+
+    /** "Keep the screen on" chosen in the app while the bot plays: on now (earlier "off"
+     *  requests are void, like after the power button). */
+    static void keepScreenOnNow() {
+        HelperService s = instance;
+        if (s == null) return;
+        screenEpoch++;
+        s.setBlack(false, true);
+        ScrcpyEngine e = ScrcpyEngine.current();
+        if (e != null) new Thread(() -> e.displayPower(true), "screen-on").start();     // (network)
+    }
+
+    // ------------------------------------------------------------------ pairing
+
+    /** Look for Settings' "Pair device with pairing code" box for a while, and pair with what it
+     *  shows (code and port) as soon as it's open: nothing to type, no switching apps (the code
+     *  changes when the box closes). False: the accessibility service is off. */
+    static boolean watchForPairing(long ms) {
+        HelperService s = instance;
+        if (s == null) return false;
+        pairingUntil = SystemClock.uptimeMillis() + ms;
+        s.startPairWatch();
+        return true;
+    }
+
+    static void stopPairWatch() {
+        pairingUntil = 0;
+    }
+
+    private synchronized void startPairWatch() {
+        if (pairWatching) return;
+        pairWatching = true;
+        new Thread(() -> {
+            String tried = null;
+            try {
+                while (SystemClock.uptimeMillis() < pairingUntil && instance == this) {
+                    PairingDialog d = findPairingDialog();
+                    if (d != null && !d.code.equals(tried)) {
+                        tried = d.code;                     // (each code once: a new box has a new one)
+                        if (Pairing.pairFromDialog(this, d)) break;
+                    }
+                    SystemClock.sleep(300);
+                }
+            } finally {
+                synchronized (this) {
+                    pairWatching = false;
+                }
+            }
+        }, "pair-watch").start();
+    }
+
+    /** The pairing box, if one of Settings' windows shows it. */
+    private PairingDialog findPairingDialog() {
+        List<AccessibilityWindowInfo> windows;
+        try {
+            windows = getWindows();
+        } catch (RuntimeException e) {
+            return null;
+        }
+        for (AccessibilityWindowInfo w : windows) {
+            AccessibilityNodeInfo root = w.getRoot();
+            if (root == null || root.getPackageName() == null
+                    || !root.getPackageName().toString().contains("settings")) continue;
+            List<String> texts = new ArrayList<>();
+            collectTexts(root, texts, 0);
+            PairingDialog d = PairingDialog.find(texts);
+            if (d != null) return d;
+        }
+        return null;
+    }
+
+    private static void collectTexts(AccessibilityNodeInfo n, List<String> out, int depth) {
+        if (n == null || out.size() > 500 || depth > 40) return;
+        CharSequence t = n.getText();
+        if (t != null && t.length() > 0) out.add(t.toString());
+        for (int i = 0; i < n.getChildCount(); i++) collectTexts(n.getChild(i), out, depth + 1);
     }
 
     /** Turn the screen on (after the power button turned it off while it was "off" for the bot). */

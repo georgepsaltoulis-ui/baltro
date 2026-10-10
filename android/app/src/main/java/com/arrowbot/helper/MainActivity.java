@@ -18,6 +18,7 @@ import android.widget.Button;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
+import android.widget.Switch;
 import android.widget.TextView;
 
 import java.io.File;
@@ -68,14 +69,25 @@ public class MainActivity extends Activity {
                 + "Once: tap \"Turn on in Accessibility\" and turn \"ArrowBot\" on. If Android says the "
                 + "setting is restricted: Settings > Apps > ArrowBot > ⋮ (top right) > Allow restricted "
                 + "settings, then try again.\n\n"
-                + "Then: \"Start bot\". The bot opens the game and plays, and the screen goes off (black) "
-                + "while it plays: press the power button to turn it back on. To stop it: \"Stop bot\" here "
-                + "or in its notification. Opening this app while it plays pauses it.\n\n"
+                + "Then: \"Start bot\". The bot opens the game and plays. With the switch below on, the "
+                + "screen goes off (black) while it plays: press the power button to turn it back on. To stop "
+                + "it: \"Stop bot\" here or in its notification. Opening this app while it plays pauses it.\n\n"
                 + "With Wireless debugging on (see the end of this page) the bot works like scrcpy on a "
                 + "computer. Without it (no Wi-Fi), Android asks to allow screen capture at each start: "
                 + "choose \"A single app\" > Arrows (with \"Entire screen\" the screen has to stay on).");
         about.setPadding(0, pad, 0, pad);
         box.addView(about);
+
+        Switch screenOff = new Switch(this);
+        screenOff.setText("Screen off while the bot plays (the power button turns it back on). Off: the "
+                + "screen stays on, to watch the game.");
+        screenOff.setChecked(Prefs.screenOff(this));
+        screenOff.setPadding(0, pad / 2, 0, pad / 2);
+        screenOff.setOnCheckedChangeListener((b, on) -> {
+            Prefs.setScreenOff(this, on);
+            if (!on) HelperService.keepScreenOnNow();   // (playing now: on right away)
+        });
+        box.addView(screenOff);
 
         start = button("▶  Start bot", v -> startBot());
         start.setTextSize(20);
@@ -118,8 +130,10 @@ public class MainActivity extends Activity {
                 + "taps through scrcpy, the screen really off. It's used by itself whenever it's on; "
                 + "without it, screen capture is used.\n"
                 + "Any Wi-Fi works (no internet needed). Once: Settings > System > Developer options > turn on "
-                + "Wireless debugging. Then tap the button below, tap \"Pair device with pairing code\" "
-                + "in Settings, pull down the notifications and type the code into ArrowBot's.");
+                + "Wireless debugging. Then tap the button below: Settings opens. Tap \"Wireless debugging\", "
+                + "then \"Pair device with pairing code\", and keep that box open: ArrowBot reads the code "
+                + "and pairs by itself (no switching apps - that changes the code). If it doesn't, pull down "
+                + "the notifications and type the code into ArrowBot's.");
         box.addView(adbHelp);
         box.addView(button("Pair with Wireless debugging", v -> Pairing.start(this)));
         code = new EditText(this);
