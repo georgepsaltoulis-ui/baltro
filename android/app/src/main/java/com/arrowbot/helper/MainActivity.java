@@ -29,10 +29,11 @@ import java.nio.charset.StandardCharsets;
 
 /**
  * The app's screen: Start / Stop the bot, what it's doing (its log), and the one-time setup
- * (Accessibility; optionally pairing with Wireless debugging). At Start, the live picture comes
- * from scrcpy over adb when Wireless debugging is there, else from screen capture (asked for
- * then). The bot (or the Termux version of it) opens this screen by itself with EXTRA_CAPTURE when
- * it needs screen capture.
+ * (Accessibility; optionally pairing with Wireless debugging). At Start, with Wireless debugging
+ * the taps and the screen go through scrcpy over adb; the live picture comes from the screen share
+ * (exact; with adb the app allows it itself), or scrcpy's video if there's no share. The bot (or
+ * the Termux version of it) opens this screen by itself with EXTRA_CAPTURE when it needs screen
+ * capture.
  */
 public class MainActivity extends Activity {
     static final String EXTRA_CAPTURE = "capture";
@@ -77,8 +78,9 @@ public class MainActivity extends Activity {
                 + "screen goes off (black) while it plays: press the power button to turn it back on. To stop "
                 + "it: \"Stop bot\" here or in its notification. Opening this app while it plays pauses it.\n\n"
                 + "With Wireless debugging on (see the end of this page) the bot works like scrcpy on a "
-                + "computer. Without it (no Wi-Fi), Android asks to allow screen capture at each start: "
-                + "choose \"A single app\" > Arrows (with \"Entire screen\" the screen has to stay on).");
+                + "computer, and shares the screen by itself for an exact picture. Without it (no Wi-Fi), "
+                + "Android asks to allow screen capture at each start: choose \"A single app\" > the game "
+                + "(with \"Entire screen\" the screen has to stay on).");
         about.setPadding(0, pad, 0, pad);
         box.addView(about);
 
@@ -140,9 +142,10 @@ public class MainActivity extends Activity {
         adbTitle.setTypeface(Typeface.DEFAULT_BOLD);
         box.addView(adbTitle);
         TextView adbHelp = new TextView(this);
-        adbHelp.setText("With it, the bot plays exactly like scrcpy on a computer: hardware video at 60 fps, "
-                + "taps through scrcpy, the screen really off. It's used by itself whenever it's on; "
-                + "without it, screen capture is used.\n"
+        adbHelp.setText("With it, the bot plays like scrcpy on a computer: taps through scrcpy, the screen "
+                + "really off, and the picture from the screen share (exact; scrcpy's compressed video "
+                + "only if the share isn't allowed). It's used by itself whenever it's on; without it, "
+                + "screen capture and Android's gestures are used.\n"
                 + "Any Wi-Fi works (no internet needed). Once: Settings > System > Developer options > turn on "
                 + "Wireless debugging. Then tap the button below: Settings opens. Tap \"Wireless debugging\", "
                 + "then \"Pair device with pairing code\", and keep that box open: ArrowBot reads the code "
@@ -234,25 +237,34 @@ public class MainActivity extends Activity {
             startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
             return;
         }
-        if (HelperService.source() != null) {
+        if (CaptureService.running()) {
             launchBot();
             return;
         }
-        // adb first (Wireless debugging: scrcpy, as on a computer), else screen capture
+        // adb first (Wireless debugging: taps and the screen through scrcpy, as on a computer), then
+        // the screen share for the pictures: they're exact, scrcpy's video is compressed (thin lines
+        // and faint dots lose their colour in it). With adb the app allows itself the screen share,
+        // so Android doesn't ask; if it asks anyway and it's declined, the bot uses adb's video.
         start.setEnabled(false);
         CaptureService.setBotState("looking for Wireless debugging");
         new Thread(() -> {
             ScrcpyEngine e = ScrcpyEngine.ensure(this, msg -> CaptureService.setBotState(msg));
+            if (e != null) allowScreenShare();
             handler.post(() -> {
                 start.setEnabled(true);
-                if (e != null || CaptureService.running()) {
-                    launchBot();
-                } else {
-                    startAfterCapture = true;       // screen capture first, then the bot
-                    requestCapture();
-                }
+                startAfterCapture = true;           // the screen share first, then the bot
+                requestCapture();
             });
         }, "start").start();
+    }
+
+    /** Through adb, like `adb shell appops set <app> PROJECT_MEDIA allow`: Android then starts the
+     *  screen share without asking (it still shows that the screen is being shared). */
+    private void allowScreenShare() {
+        try {
+            Adb.get(this).shell("appops set " + getPackageName() + " PROJECT_MEDIA allow");
+        } catch (Exception ignored) {
+        }
     }
 
     private void launchBot() {
@@ -261,7 +273,13 @@ public class MainActivity extends Activity {
     }
 
     private void requestCapture() {
-        if (CaptureService.running()) return;
+        if (CaptureService.running()) {
+            if (startAfterCapture) {
+                startAfterCapture = false;
+                launchBot();
+            }
+            return;
+        }
         MediaProjectionManager mpm = getSystemService(MediaProjectionManager.class);
         // "A single app" (Arrows) lets the screen be black while the bot still sees the game
         Intent i = Build.VERSION.SDK_INT >= 34
@@ -278,7 +296,11 @@ public class MainActivity extends Activity {
         if (ok) CaptureService.start(this, resultCode, data);
         if (startAfterCapture) {
             startAfterCapture = false;
-            if (ok) waitForCaptureThenStart(50);
+            if (ok) {
+                waitForCaptureThenStart(50);
+            } else if (ScrcpyEngine.current() != null) {
+                launchBot();                        // no screen share: adb's video
+            }
         }
         if (finishAfterCapture) {
             finishAfterCapture = false;
@@ -288,7 +310,7 @@ public class MainActivity extends Activity {
 
     /** The capture service takes a moment to come up: the bot starts once it runs (it would ask again). */
     private void waitForCaptureThenStart(int triesLeft) {
-        if (CaptureService.running()) {
+        if (CaptureService.running() || (triesLeft <= 0 && ScrcpyEngine.current() != null)) {
             launchBot();
         } else if (triesLeft > 0) {
             handler.postDelayed(() -> waitForCaptureThenStart(triesLeft - 1), 100);
@@ -311,8 +333,9 @@ public class MainActivity extends Activity {
         boolean waiting = Approvals.pending != null;
         String mode = HelperService.mode();
         status.setText("Accessibility:  " + (HelperService.instance != null ? "ON" : "off  <- turn it on (below)")
-                + "\nLive picture:   " + (mode.equals("adb") ? "scrcpy over adb" : mode.equals("capture")
-                        ? "screen capture" : "off (on at Start)")
+                + "\nLive picture:   " + (mode.equals("adb") ? "scrcpy over adb (compressed video)"
+                        : mode.equals("capture+adb") ? "screen share (exact), taps through adb"
+                        : mode.equals("capture") ? "screen capture" : "off (on at Start)")
                 + "\nWireless debug: " + Adb.status
                 + (Pairing.result.isEmpty() ? "" : "\nPairing:        " + Pairing.result)
                 + "\nscrcpy:         " + ScrcpyEngine.status

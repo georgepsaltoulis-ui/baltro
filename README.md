@@ -28,8 +28,9 @@ only needed to download it.
    top right, tap *Allow restricted settings*, and try again.
 3. **Choose the game** (tap *Game:* — every app on the phone is listed, Arrows and Amaze GO! first)
    and **tap "Start bot".** If Wireless debugging is on (see below), the bot uses it and nothing is
-   asked. Otherwise Android asks to allow screen capture, every time the bot starts: choose
-   **A single app**, then **Arrows**, and tap *Start*.
+   asked: through adb the app allows itself to share the screen. Otherwise Android asks to allow
+   screen capture, every time the bot starts: choose **A single app**, then the game, and tap
+   *Start*.
 
 The bot then opens the game and plays, and the screen goes off. The app's screen shows what the bot
 is doing; press the power button to see it.
@@ -45,8 +46,12 @@ the bot's usual pace, one every 50 ms, queued so they never cut each other off.
 The app plays in one of two ways, and picks by itself:
 
 - **With Wireless debugging (preferred):** the app runs scrcpy over its own adb connection to the
-  phone, like `ArrowBot.py` does on a computer. scrcpy's video is decoded by the phone's hardware
-  decoder, taps go through scrcpy, and the screen's panel really switches off.
+  phone, like `ArrowBot.py` does on a computer: taps go through scrcpy, and the screen's panel
+  really switches off. The bot's picture comes from Android's screen share, which the app allows
+  itself through adb: it's exact, while scrcpy's video is compressed (on zoomed-out boards the thin
+  lines and faint dots lose their colour in it). If the share isn't allowed or stops (the phone
+  locked), the bot uses scrcpy's video, decoded by the phone's hardware decoder; it reads Amaze's
+  lines and dots mainly by their brightness, which the video keeps.
 - **Without it:** taps and swipes go through Android's accessibility service, and the bot sees the
   screen through screen capture. "Screen off" is a black cover over the screen at the lowest
   brightness (on the Pixel's OLED screen, black pixels are off). The bot still sees the game under
@@ -71,7 +76,8 @@ Once:
    notification, still with the box open. In split screen, you can type it into the app instead.
 
 After that, *Start bot* uses it by itself whenever Wireless debugging is on. The app's screen shows
-which way it's playing (*Live picture: scrcpy over adb* or *screen capture*).
+which way it's playing (*Live picture: screen share (exact), taps through adb*, *scrcpy over adb*
+or *screen capture*).
 
 If the phone was set up with `adb tcpip 5555` from a computer (see *No Wi-Fi?* below), the app uses
 that too, with no Wi-Fi. The phone asks "Allow USB debugging?" once.

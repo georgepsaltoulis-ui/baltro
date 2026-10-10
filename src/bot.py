@@ -729,7 +729,9 @@ def start_scrcpy():
             link_video = True
             mode, _ = helper.mode()
             print(f"[+] Live picture {link.size[0]}x{link.size[1]}: " + (
-                "scrcpy over the app's adb (Wireless debugging), taps through scrcpy" if mode == "adb" else
+                "scrcpy over the app's adb (Wireless debugging), taps through scrcpy (compressed video: "
+                "start the bot from the app's Start button to share the screen instead)" if mode == "adb" else
+                "the screen share (exact), taps through scrcpy over the app's adb" if mode == "capture+adb" else
                 "screen capture, taps through accessibility (Wireless debugging would let it use scrcpy)"))
         except Exception as e:
             print(f"[-] The helper app can't capture the screen ({e}); trying again in a moment.")
@@ -1484,10 +1486,21 @@ def band_rows():
     top, bottom = STATUS_BAR_BAND if status_bar_visible else HEADER_BAND
     return max(0, top - ROI_Y1), max(-1, bottom - ROI_Y1)
 
-def _off_grid(cen, keep, dots):
-    """Amaze: blobs (by label; keep = candidates, label 0 = background) that aren't grid dots - a
-    dot has another one grid step away, straight across or up/down; a speck of confetti or of a
-    banner's shadow sitting beside the board (it widened the board's outline) doesn't."""
+AMAZE_LINE_V = 176            # darker than this: a line (halfway between a line and the board)
+AMAZE_HUES = np.zeros(256, np.uint8)     # OpenCV hue (0-180) -> 1 red, 2 tan/brown, 4 teal/blue/purple
+AMAZE_HUES[0:10] = AMAZE_HUES[165:181] = 1
+AMAZE_HUES[10:31] = 2
+AMAZE_HUES[35:156] = 4
+AMAZE_DOT_CONTRAST = 14       # this much darker than the board around it: a dot (dots ~25, the
+                              # board's own shading up to ~10)
+AMAZE_AROUND_KERNEL = cv2.getStructuringElement(cv2.MORPH_RECT, (21, 21))   # > a dot, a line's width
+AMAZE_LINE_EDGE = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))         # a line's soft edge
+
+def _off_grid(cen, keep, dots, lines):
+    """Amaze: blobs (by label; keep = candidates, label 0 = background) that aren't grid dots. A dot
+    has others one grid step away, straight across and/or up and down - at least two (or lines:
+    an arrow covers the dots of its cells). A speck of confetti or of a banner's shadow beside the
+    board (it widened the board's outline), even in pieces after video compression, doesn't."""
     out = np.zeros(len(cen), bool)
     idx = np.nonzero(keep)[0]
     idx = idx[idx > 0]
@@ -1502,14 +1515,16 @@ def _off_grid(cen, keep, dots):
     if step < 8:
         return out
     tol = max(2, int(round(0.2 * step)))
-    near = cv2.dilate(dots, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * tol + 1, 2 * tol + 1)))
+    near = cv2.dilate(cv2.bitwise_or(dots, lines),
+                      cv2.getStructuringElement(cv2.MORPH_RECT, (2 * tol + 1, 2 * tol + 1)))
     h, w = dots.shape
-    on = np.zeros(len(pts), bool)
+    hits = np.zeros(len(pts), np.int32)
     for ox, oy in ((step, 0), (-step, 0), (0, step), (0, -step)):
         xx = np.round(pts[:, 0] + ox).astype(int)
         yy = np.round(pts[:, 1] + oy).astype(int)
         ok = (xx >= 0) & (xx < w) & (yy >= 0) & (yy < h)
-        on[ok] |= near[yy[ok], xx[ok]] > 0
+        hits[ok] += near[yy[ok], xx[ok]] > 0
+    on = hits >= 2
     if on.mean() < 0.6:
         return out                                     # not a clear grid: leave it alone
     out[idx[~on]] = True
@@ -1520,13 +1535,37 @@ def build_masks(roi_bgr, hsv=None, keep=None):
     if hsv is None:
         hsv = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2HSV)
     if AMAZE:
-        # dark brown lines (red after a bounce) on a pale beige board; the grid dots are a pale tan
-        # Confetti (orange, yellow, red, salmon) falls over the board at "50% Complete!" and the
-        # end: the same hues but much brighter (V 240-255; lines ~110, red ~200, dots ~222).
-        line_mask = cv2.bitwise_or(cv2.inRange(hsv, (0, 90, 0), (30, 255, 215)),
-                                   cv2.inRange(hsv, (160, 90, 0), (180, 255, 215)))
-        dots = cv2.inRange(hsv, (0, 45, 60), (30, 255, 238))
-        dots = cv2.bitwise_and(dots, cv2.bitwise_not(line_mask))
+        # Dark brown lines (red after a bounce) and pale tan dots on a pale beige board, told apart
+        # by BRIGHTNESS (lines ~110, red ~200, dots ~222, board ~245): scrcpy's video keeps that at
+        # full resolution, but stores colour at half resolution and compresses it - thin lines and
+        # faint dots lost their colour in it (Level 10 zoomed out: 24 of 78 arrows seen). Colour
+        # only keeps out what's dark but plainly not brown (a flying arrow's teal trail).
+        # Confetti (orange, yellow, red, salmon) at "50% Complete!" and the end: brighter than the
+        # dots (240-255), and the blobs below drop what isn't a grid dot.
+        hue_ch, sat, v = cv2.split(hsv)
+        hue = cv2.LUT(hue_ch, AMAZE_HUES)                # 1 red, 2 tan/brown, 4 teal/blue/purple
+        not_brown = cv2.bitwise_and(cv2.inRange(hue, 4, 4), cv2.inRange(sat, 40, 255))
+        line_mask = cv2.bitwise_and(cv2.inRange(v, 0, AMAZE_LINE_V), cv2.bitwise_not(not_brown))
+        # red (bounced) arrows: saturation ~190 even in video; red confetti never above ~140
+        line_mask = cv2.bitwise_or(line_mask, cv2.bitwise_and(cv2.bitwise_and(
+            cv2.inRange(hue, 1, 1), cv2.inRange(sat, 150, 255)), cv2.inRange(v, 60, 215)))
+        # dots: a little darker than the board around them (what a closing leaves once it has
+        # filled the dots and thin lines in)
+        around = cv2.morphologyEx(v, cv2.MORPH_CLOSE, AMAZE_AROUND_KERNEL)
+        dots = cv2.inRange(cv2.subtract(around, v), AMAZE_DOT_CONTRAST, 255)
+        # (dots are a dull tan - or too faint to tell: anything else is confetti or a trail)
+        tan = cv2.bitwise_or(cv2.bitwise_and(cv2.inRange(hue, 2, 2), cv2.inRange(sat, 0, 109)),
+                             cv2.inRange(sat, 0, 39))
+        # (nor right beside a line: its soft edge is darker than the board too, in bits that made
+        # the "typical dot" tiny - and real dots then too big to be dots. A dot is always several px
+        # from any line: lines run through the cells' centres, dots sit in the empty ones.)
+        dots = cv2.bitwise_and(dots, cv2.bitwise_and(tan, cv2.bitwise_not(cv2.dilate(line_mask, AMAZE_LINE_EDGE))))
+        # the header (and a banner like "50% Complete!" over it: its emoji is arrow-coloured and
+        # pokes a few px below) is never board - nor its text and icons dots (they made the
+        # "typical dot" tiny, and real dots too big to be dots)
+        b0, b1 = band_rows()
+        if b1 >= b0:
+            dots[b0:b1 + 9] = 0
         # ...and any shaded piece that's darker: a blob much bigger than the grid's dots isn't one
         n, lab, st, cen = cv2.connectedComponentsWithStats(dots, connectivity=8)
         if n > 12:
@@ -1540,16 +1579,12 @@ def build_masks(roi_bgr, hsv=None, keep=None):
                         part[lab[y:y + bh, x:x + bw] == i] = 0
                 drop = np.zeros(n, bool)
                 drop[1:] = areas > max(40.0, 3.0 * typical)
+                # ...and specks much smaller than a dot (bits of confetti or a trail after video
+                # compression; they'd also spoil the grid's spacing)
+                drop[1:] |= areas < max(2.0, 0.3 * typical)
                 clear(np.nonzero(drop)[0])
-                # (specks much smaller than a dot - bits of line edges, gone after the opening
-                # below - would spoil the grid's spacing: not candidates)
-                cand = ~drop
-                cand[1:] &= areas >= max(2.0, 0.3 * typical)
-                clear(np.nonzero(_off_grid(cen, cand, dots))[0])
+                clear(np.nonzero(_off_grid(cen, ~drop, dots, line_mask))[0])
         board = cv2.bitwise_or(dots, line_mask)
-        # the header (and a banner like "50% Complete!" over it: its emoji is arrow-coloured and
-        # pokes a few px below) is never board
-        b0, b1 = band_rows()
         if b1 >= b0:
             board[b0:b1 + 9] = 0
     else:
@@ -1585,6 +1620,8 @@ def build_masks(roi_bgr, hsv=None, keep=None):
             sub = labels[sy:sy + sh, sx:sx + sw]
             sel = sub == i
             line_mask[sy:sy + sh, sx:sx + sw][sel] = 0
+            if AMAZE:       # (bits of red confetti in compressed video: not board either)
+                board[sy:sy + sh, sx:sx + sw][sel] = 0
             if keep is not None:
                 sub[sel] = 0
     if keep is not None:
@@ -1680,8 +1717,11 @@ def is_solid_head(hsv, cx, cy):
         return False
     mid = patch[k // 2].astype(float) if k % 2 else (patch[k // 2 - 1].astype(float) + patch[k // 2]) / 2
     h, s, v = (float(c) for c in mid)    # per-channel medians (one sort instead of three)
-    if AMAZE:   # brown at rest, red after a bounce; a fading arrow goes pale
-        return s >= 80 and (h <= 30 or h >= 160)
+    if AMAZE:   # dark brown at rest, red after a bounce; a fading arrow goes pale, a trail is teal
+        # (brightness first: in scrcpy's video a thin head's colour fades into the board's)
+        if 35 <= h <= 155 and s >= 40:
+            return False
+        return v <= AMAZE_LINE_V or (s >= 150 and v <= 215 and (h <= 9 or h >= 165))
     if (h <= 10 or h >= 170) and s >= 120 and v >= 150:
         return True                                   # red: bounced earlier, resting
     return s <= SOLID_MAX_SAT and v >= SOLID_MIN_VAL  # lavender: resting

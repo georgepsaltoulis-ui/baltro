@@ -47,8 +47,9 @@ import java.util.concurrent.TimeUnit;
  * on. It also runs the little server the bot talks to: 127.0.0.1 only (nothing outside the phone
  * can reach it), and every program has to be allowed once on the phone (Approvals).
  *
- * With adb (Wireless debugging, see Adb), frames, taps and the screen's power go through scrcpy
- * instead (ScrcpyEngine), as on a computer; without it, through screen capture and gestures.
+ * With adb (Wireless debugging, see Adb), taps and the screen's power go through scrcpy instead
+ * (ScrcpyEngine), as on a computer, and so do the frames unless the screen share runs too (its
+ * pictures are exact; scrcpy's video is compressed). Without adb: screen capture and gestures.
  *
  * Protocol: one text line per request, one text line back ("OK ..." / "ERR ..."); FRAME answers
  * with a header line followed by the raw pixels. Commands: see serve().
@@ -188,17 +189,32 @@ public class HelperService extends AccessibilityService {
         out.flush();
     }
 
-    /** Where frames come from: scrcpy over adb when it runs, else screen capture (or nothing). */
+    /** Where frames come from: the screen share when it runs - its pictures are exact, scrcpy's
+     *  video is compressed (thin lines and faint dots lose their colour in it) - else scrcpy over
+     *  adb (or nothing). Touches and the screen-off still go through adb whenever it runs. */
     static FrameSource source() {
-        ScrcpyEngine e = ScrcpyEngine.current();
-        if (e != null) return e;
         CaptureService c = CaptureService.instance;
-        return c != null && c.alive() ? c : null;
+        if (c != null && c.alive()) return c;
+        return ScrcpyEngine.current();
     }
 
+    /** adb (scrcpy's video + touches) / capture+adb (screen share pictures, adb touches) /
+     *  capture (screen share + accessibility touches) / none. */
     static String mode() {
         FrameSource s = source();
-        return s instanceof ScrcpyEngine ? "adb" : s != null ? "capture" : "none";
+        if (s instanceof ScrcpyEngine) return "adb";
+        if (s != null) return ScrcpyEngine.current() != null ? "capture+adb" : "capture";
+        return "none";
+    }
+
+    /** The bot's touch coordinates are in its frames' pixels; scrcpy's are its video's. The same
+     *  when the frames are scrcpy's, scaled when they're the screen share's. */
+    private static float[] touchScale(ScrcpyEngine e) {
+        FrameSource src = source();
+        if (src == null || src == e) return new float[]{1f, 1f};
+        int[] from = src.size(), to = e.size();
+        if (from[0] <= 0 || from[1] <= 0 || to[0] <= 0 || to[1] <= 0) return new float[]{1f, 1f};
+        return new float[]{(float) to[0] / from[0], (float) to[1] / from[1]};
     }
 
     /** Frames on: scrcpy over adb if this phone has it (Wireless debugging), else Android's screen
@@ -270,7 +286,7 @@ public class HelperService extends AccessibilityService {
                             send(out, "OK " + wh[0] + " " + wh[1] + " " + (src != null ? 1 : 0));
                             break;
                         }
-                        case "MODE":        // adb (scrcpy over adb) / capture (screen capture) / none
+                        case "MODE":        // adb / capture+adb / capture / none (see mode())
                             send(out, "OK " + mode() + " " + ScrcpyEngine.status.replace('\n', ' '));
                             break;
                         case "CAPTURE":     // make sure frames come (adb, or screen capture: asks on the phone)
@@ -322,21 +338,27 @@ public class HelperService extends AccessibilityService {
                         }
                         case "TAP": {       // TAP x y hold_ms
                             ScrcpyEngine e = ScrcpyEngine.current();
-                            boolean ok = e != null ? e.tap(f(a[1]), f(a[2]), l(a[3])) : tap(f(a[1]), f(a[2]), l(a[3]));
+                            float[] k = e != null ? touchScale(e) : null;
+                            boolean ok = e != null ? e.tap(f(a[1]) * k[0], f(a[2]) * k[1], l(a[3]))
+                                    : tap(f(a[1]), f(a[2]), l(a[3]));
                             send(out, ok ? "OK" : "ERR cancelled");
                             break;
                         }
                         case "DRAG": {      // DRAG x0 y0 x1 y1 move_ms hold_ms
                             ScrcpyEngine e = ScrcpyEngine.current();
-                            boolean ok = e != null ? e.drag(f(a[1]), f(a[2]), f(a[3]), f(a[4]), l(a[5]), l(a[6]))
+                            float[] k = e != null ? touchScale(e) : null;
+                            boolean ok = e != null
+                                    ? e.drag(f(a[1]) * k[0], f(a[2]) * k[1], f(a[3]) * k[0], f(a[4]) * k[1], l(a[5]), l(a[6]))
                                     : drag(f(a[1]), f(a[2]), f(a[3]), f(a[4]), l(a[5]), l(a[6]));
                             send(out, ok ? "OK" : "ERR cancelled");
                             break;
                         }
                         case "PINCH": {     // PINCH ax0 ay0 bx0 by0 ax1 ay1 bx1 by1 ms
                             ScrcpyEngine e = ScrcpyEngine.current();
+                            float[] k = e != null ? touchScale(e) : null;
                             boolean ok = e != null
-                                    ? e.pinch(f(a[1]), f(a[2]), f(a[3]), f(a[4]), f(a[5]), f(a[6]), f(a[7]), f(a[8]), l(a[9]))
+                                    ? e.pinch(f(a[1]) * k[0], f(a[2]) * k[1], f(a[3]) * k[0], f(a[4]) * k[1],
+                                    f(a[5]) * k[0], f(a[6]) * k[1], f(a[7]) * k[0], f(a[8]) * k[1], l(a[9]))
                                     : pinch(f(a[1]), f(a[2]), f(a[3]), f(a[4]), f(a[5]), f(a[6]), f(a[7]), f(a[8]), l(a[9]));
                             send(out, ok ? "OK" : "ERR cancelled");
                             break;
