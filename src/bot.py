@@ -3749,13 +3749,25 @@ def progress_fill(frame):
     green = (hsv[:, :, 0] > 35) & (hsv[:, :, 0] < 85) & (hsv[:, :, 1] > 100) & (hsv[:, :, 2] > 120)
     return min(1.0, int(green.any(axis=0).sum()) / 222.0)
 
+AMAZE_LIVES = 3   # drops at the start of a level
+
 def count_stars(frame):
     """Lit stars in the level header (each mistake costs one)."""
-    if AMAZE:   # lives: blue drops (a lost one turns grey)
+    if AMAZE:
+        # Lives: blue drops; a lost one turns into a grey drop. Counted by the grey ones, not the
+        # missing blue ones: something covering a drop (the "50% Complete!" banner, a popup, the
+        # level's intro) is not a lost life - the bot thought so, and stopped tapping those arrows.
         hsv = cv2.cvtColor(frame[350 + hud_dy:440 + hud_dy, 40:330], cv2.COLOR_BGR2HSV)
         blue = cv2.inRange(hsv, (95, 120, 150), (115, 255, 255))
+        grey = cv2.inRange(hsv, (0, 0, 150), (180, 89, 228))        # dull tan-grey (board ~245)
         n, _, st, _ = cv2.connectedComponentsWithStats(blue)
-        return int(np.count_nonzero(st[1:, cv2.CC_STAT_AREA] > 800))
+        n_blue = int(np.count_nonzero(st[1:, cv2.CC_STAT_AREA] > 800))
+        n, _, st, _ = cv2.connectedComponentsWithStats(grey)
+        a = st[1:, cv2.CC_STAT_AREA]
+        n_grey = int(np.count_nonzero((a > 1500) & (a < 4500)))     # drop-sized (a drop: ~2850 px)
+        if n_blue + n_grey > AMAZE_LIVES:
+            return n_blue                                           # (more lives than usual: as seen)
+        return AMAZE_LIVES - n_grey
     hsv = cv2.cvtColor(frame[150 + hud_dy:240 + hud_dy, 410:680], cv2.COLOR_BGR2HSV)
     yellow = (hsv[:, :, 0] >= 18) & (hsv[:, :, 0] <= 35) & (hsv[:, :, 1] > 120) & (hsv[:, :, 2] > 180)
     return min(3, int(round(yellow.sum() / 2250)))
@@ -4083,6 +4095,7 @@ def run_solver(deadline=None):
     plan = None                # cached escapes: {"arrows", "pose", "mask", "last_tap"}
     waves_ok = True            # turned off for the level if a planned wave ever costs a star
     level_half = None          # line thickness right after zooming out (zoom gauge)
+    progress_taps = [0]        # times arrows were seen leaving (background play: do taps reach the game?)
     in_flight = []             # exit lanes of arrows we tapped that may still be flying: [{"rect", "t"}]
     last_arrows_seen = time.time()
     search_step = 0            # position in the outward search spiral when no arrows are in view
@@ -4445,6 +4458,7 @@ def run_solver(deadline=None):
         line_pixels = cv2.countNonZero(mask)
         if prev_line_pixels is not None and line_pixels < prev_line_pixels - 200:
             last_progress = current_time
+            progress_taps[0] += 1
             stuck_soft_done = False
             world_soft_reset = False
         prev_line_pixels = line_pixels
@@ -4521,6 +4535,9 @@ def run_solver(deadline=None):
             if times >= MAX_TAPS_PER_ARROW and not is_bad(wx, wy, rec["dir"]):
                 bad_spots.append((wx, wy, rec["dir"]))
                 print(f"[!] Tapped the arrow at board ({wx},{wy}) {times}x and it won't leave; skipping it.")
+                if BACKGROUND and len(bad_spots) == 3 and not progress_taps[0]:
+                    print("[!] No arrow has left since the bot started tapping: its taps may not be reaching "
+                          "the game on the hidden screen. (In the app's picture of it: do arrows fly off?)")
         in_flight[:] = [f for f in in_flight
                         if current_time - f["t"] < 4.0 and (ink(f["rect"]) or still_at_start(f))]
 

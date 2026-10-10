@@ -56,8 +56,8 @@ final class ScrcpyEngine implements FrameSource {
     static final String SERVER_ASSET = "bot/Scrcpy/scrcpy-server";
     static final String REMOTE = "/data/local/tmp/arrowbot-scrcpy-server.jar";
     static final int MAX_FPS = 60, BIT_RATE = 8_000_000;
-    /** Background play: the hidden screen's video, a little sharper (nothing else is encoding). */
-    static final int BACKGROUND_BIT_RATE = 12_000_000;
+    /** Background play: the hidden screen's video, sharper (it's all the bot sees of it). */
+    static final int BACKGROUND_BIT_RATE = 24_000_000;
     private static final int MSG_INJECT_KEYCODE = 0, MSG_INJECT_TOUCH = 2, MSG_SET_DISPLAY_POWER = 10,
             MSG_START_APP = 16;
     private static final Pattern NEW_DISPLAY = Pattern.compile("New display: .*\\(id=(\\d+)\\)");
@@ -102,7 +102,7 @@ final class ScrcpyEngine implements FrameSource {
      *  never locked and kept active), streamed and tapped like the real one, so the phone itself
      *  stays free (and can even be turned off). Otherwise: the phone's own screen. */
     final boolean background;
-    /** The hidden screen: "WxH/dpi" (the phone's screen scaled to 1080 wide, same layout). */
+    /** The hidden screen: "WxH/dpi" (the phone's own resolution and density). */
     private final String hiddenScreen;
     /** Its display id (from the server's log), -1 until known. */
     volatile int displayId = -1;
@@ -116,17 +116,14 @@ final class ScrcpyEngine implements FrameSource {
         this.hiddenScreen = background ? hiddenScreenSize(c) : null;
     }
 
-    /** The phone's screen at 1080 px wide (the bot's working size), portrait, with the density
-     *  scaled the same way: the game lays out exactly as on the phone, just smaller. */
+    /** The phone's own screen size and density, portrait: the game draws exactly as it does there
+     *  (the bot scales its picture down like a screenshot's). Sides rounded to 8 for the encoder. */
     static String hiddenScreenSize(Context c) {
         DisplayMetrics m = new DisplayMetrics();
         Display d = c.getSystemService(DisplayManager.class).getDisplay(Display.DEFAULT_DISPLAY);
         d.getRealMetrics(m);
-        int pw = Math.min(m.widthPixels, m.heightPixels), ph = Math.max(m.widthPixels, m.heightPixels);
-        int w = Math.min(pw, 1080);
-        int h = Math.round(ph * (float) w / pw / 8f) * 8;
-        int dpi = Math.max(120, Math.round(m.densityDpi * (float) w / pw));
-        return w + "x" + h + "/" + dpi;
+        int w = Math.min(m.widthPixels, m.heightPixels) / 8 * 8, h = Math.max(m.widthPixels, m.heightPixels) / 8 * 8;
+        return w + "x" + h + "/" + m.densityDpi;
     }
 
     static ScrcpyEngine current() {
