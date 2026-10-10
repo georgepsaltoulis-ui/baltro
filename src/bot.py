@@ -343,9 +343,12 @@ class ScrcpyLink:
     def drag(self, x0, y0, x1, y1, steps=10, step_time=0.012, hold=0.08):
         """One finger: down, move (slowing down toward the end), hold still (no fling), up."""
         self._touch(ACTION_DOWN, x0, y0)
+        t0 = time.time()
         for i in range(1, steps + 1):
-            time.sleep(step_time)
-            f = 1 - (1 - i / steps) ** 2      # ease out: release speed ~0, so the game doesn't fling
+            # each move at its own time on the clock (fixed sleeps let delays pile up: jerky)
+            time.sleep(max(0.0, t0 + i * step_time - time.time()))
+            t = i / steps
+            f = t * t * (3 - 2 * t)           # gentle start and stop: no speed left, so no fling
             self._touch(ACTION_MOVE, x0 + (x1 - x0) * f, y0 + (y1 - y0) * f)
         time.sleep(hold)
         self._touch(ACTION_UP, x1, y1)
@@ -1142,6 +1145,13 @@ def pan_camera(direction, amount=None):
         # exact distances can go up to 75% of the view in one pan (still enough overlap to measure)
         # (callers keep pans within PAN_MAX; only pans that finish at a known limit go further)
         want[d] = int(size * PAN_FRACTION) if amt is None else max(40, min(int(size * PAN_MAX_TO_EDGE), int(amt)))
+        if AMAZE:
+            # Short enough that a pan can only reach the camera limit if the board's edge was already
+            # in view (then the edge measures the move exactly; on plain dots nothing else could)
+            room = {"LEFT": AMAZE_LIMIT_X - ROI_X1, "RIGHT": ROI_X2 - 1 - AMAZE_LIMIT_X,
+                    "TOP": AMAZE_LIMIT_Y - (ROI_Y1 + (b1 + 1 if b1 >= b0 else 0)),
+                    "BOTTOM": ROI_Y2 - 1 - AMAZE_LIMIT_Y}[d]
+            want[d] = max(40, min(want[d], room - AMAZE_EDGE_ROOM))
         reach[d] = int(0.9 * ((ROI_X2 - ROI_X1) - 2 * 60)) if vx else int(0.9 * (ROI_Y2 - (ROI_Y1 + b1 + 1)))
     # The board moves only part of the way the finger goes (learned from measured pans): drag
     # that much further so one pan lands where it should (short pans meant a 2nd pan every time).
@@ -1152,7 +1162,10 @@ def pan_camera(direction, amount=None):
     total_x = total_y = 0
     for d, amt in want.items():
         vx, vy = DIRS[d]
-        amt = min(reach[d], max(int(amt / pan_gain), int(amt + TOUCH_SLOP)))
+        if AMAZE:
+            amt = min(reach[d], int(amt / amaze_gain + TOUCH_SLOP))
+        else:
+            amt = min(reach[d], max(int(amt / pan_gain), int(amt + TOUCH_SLOP)))
         # Content moves opposite to the side we want to reveal
         total_x, total_y = total_x - vx * amt, total_y - vy * amt
     return pan_by(total_x, total_y)
@@ -1173,9 +1186,53 @@ PAN_PRIOR_MAX = 0.03      # ...at most this much (only breaks near-ties between 
 MAX_BLIND_SURVEY_PANS = 8 # survey pans one way with no arrows in view before calling it that side's
                           # limit (a misread pan must not sweep "right" forever)
 
+# Amaze GO!: the camera's centre stays on the board, so at a camera limit the board's edge sits on
+# the screen's centre line (measured: dots at x=540, y=1236), and a drag moves the board steadily
+# (gain x (finger - slop), learned from pans measured exactly). Its dot grid also blinks (dots fade
+# out and back at random), so a view of plain dots matches itself every grid step: such a pan is
+# measured to within a step by the drag, and the dots only fix where in the step it is.
+AMAZE_LIMIT_X, AMAZE_LIMIT_Y = 540, 1236
+AMAZE_EDGE_ROOM = 80     # pans stop this short of moving a board edge out of view (see pan_camera)
+amaze_gain = 0.9
+amaze_gain_samples = []
+
+def amaze_learn_gain(finger, moved):
+    global amaze_gain
+    if abs(finger) - TOUCH_SLOP < 200:
+        return
+    r = abs(moved) / (abs(finger) - TOUCH_SLOP)
+    if 0.4 <= r <= 1.3:
+        amaze_gain_samples.append(r)
+        del amaze_gain_samples[:-6]
+        amaze_gain = float(np.median(amaze_gain_samples))
+
+def amaze_edge_state(board, d):
+    """Amaze: the board's `d` edge in this view - "at" the camera limit (on the centre line), "away"
+    from it, or None (not in view)."""
+    if board is None:
+        return None
+    m = board.copy()
+    b0, b1 = band_rows()
+    if b1 >= b0:
+        m[b0:b1 + 1] = 0
+    bb = board_bbox(m)
+    if bb is None:
+        return None
+    h, w = m.shape
+    v = {"LEFT": bb[0], "TOP": bb[1], "RIGHT": bb[2], "BOTTOM": bb[3]}[d]
+    inside = {"LEFT": v > EDGE_MARGIN, "RIGHT": v < w - 1 - EDGE_MARGIN,
+              "TOP": v > (b1 + 1 if b1 >= b0 else 0) + EDGE_MARGIN, "BOTTOM": v < h - 1 - EDGE_MARGIN}[d]
+    if not inside:
+        return None
+    line = AMAZE_LIMIT_X - ROI_X1 if d in ("LEFT", "RIGHT") else AMAZE_LIMIT_Y - ROI_Y1
+    return "at" if abs(v - line) <= 25 else "away"
+
 def expected_move(finger):
     """Board movement a drag of `finger` px (signed) should cause: the slop is lost, the rest
     follows at about pan_gain (whichever predicts less)."""
+    if AMAZE:
+        m = amaze_gain * max(0.0, abs(finger) - TOUCH_SLOP)
+        return m if finger >= 0 else -m
     m = min(abs(finger) * pan_gain, max(0.0, abs(finger) - TOUCH_SLOP))
     return m if finger >= 0 else -m
 
@@ -1208,8 +1265,13 @@ def pan_by(content_dx, content_dy):
         try:
             vw, vh = link.size
             fx, fy = vw / SCREEN_W, vh / SCREEN_H
+            steps = 20 if pan_fast else 28
+            if AMAZE:
+                # Amaze's pans are long (up to ~1300px): a 0.3s drag rushed them. ~2px per ms
+                # looks smooth; 0.3-0.7s.
+                steps = max(steps, min(56, int(math.hypot(ex - sx, ey - sy) / 2.0 / 12.5)))
             link.drag(sx * fx, sy * fy, ex * fx, ey * fy,
-                      steps=20 if pan_fast else 28, step_time=0.015, hold=0.1 if pan_fast else 0.2)
+                      steps=steps, step_time=0.0125, hold=0.1 if pan_fast else 0.2)
             # ~0.3s drags: the game moves the board ~90% of a steady drag but only ~55% (and
             # unevenly) of a 0.12s flick - so a slower drag needs fewer pans overall
             done = True
@@ -2122,6 +2184,9 @@ class World:
         """Measure the actual camera move by phase correlation against the pre-pan frame."""
         global pan_gain, pan_gain_samples
         was_uncertain = self.pose_uncertain
+        if AMAZE and self.grid_step is None and board is not None:
+            # (forgotten with the map): the edge checks and the plain-dot reading need it
+            self.grid_step = measure_grid_step(board, mask)
         for d in direction.split("+"):              # an axis that moves is anchored again only by
             self.anchor["x" if d in ("LEFT", "RIGHT") else "y"] = False   # stopping at a known limit
         # Few arrow lines on either side of the pan (end of a big level): measure with the grid
@@ -2165,6 +2230,7 @@ class World:
             (rx, ry), r2 = cv2.phaseCorrelate(a, b, wwin)
             if r2 > response and abs(rx) < a.shape[1] / 4 and abs(ry) < a.shape[0] / 4:
                 mdx, mdy, response = (sx + rx) * 2, (sy + ry) * 2, r2
+        es = None
         if "+" not in direction:
             mdx, mdy, response = self._check_axis_move(small, direction, ex, ey, mdx, mdy, response,
                                                        None if few_lines else mask)
@@ -2176,8 +2242,26 @@ class World:
                 cur = mdx if direction in ("LEFT", "RIGHT") else mdy
                 if abs(es - cur) > 6:
                     print(f"    [pan] the board's edge moved {es:+.0f} px (picture said {cur:+.0f}): going by the edge")
-                    mdx, mdy = (es, 0.0) if direction in ("LEFT", "RIGHT") else (0.0, es)
-                    response = max(response, 0.5)
+                # (the edge measured it, whatever the picture said; a straight drag doesn't move sideways)
+                mdx, mdy = (es, 0.0) if direction in ("LEFT", "RIGHT") else (0.0, es)
+                response = max(response, 0.5)
+            if AMAZE:
+                horiz_d = direction in ("LEFT", "RIGHT")
+                finger, cur = (ex, mdx) if horiz_d else (ey, mdy)
+                amaze_lim = amaze_edge_state(board, direction)
+                step = self.grid_step
+                if es is None and few_lines and step and response > 0.05 and amaze_lim != "at":
+                    # plain dots (blinking): right to within a fraction of a step, not which step
+                    p = expected_move(finger)
+                    k = int(round((p - cur) / step))
+                    if k:
+                        new = cur + k * step
+                        print(f"    [pan] plain dots read {cur:+.0f} px; the dots repeat every {step:.0f} px "
+                              f"and the drag moves ~{p:+.0f}: {new:+.0f}")
+                        mdx, mdy = (new, 0.0) if horiz_d else (0.0, new)
+                    response = max(response, 0.3)
+                elif amaze_lim != "at" and (es is not None or (not few_lines and response > 0.5)):
+                    amaze_learn_gain(finger, cur)
         comps = direction.split("+")            # "BOTTOM+RIGHT" = one diagonal drag
         horiz = {d: d in ("LEFT", "RIGHT") for d in comps}
         exp_of = {d: (ex if horiz[d] else ey) for d in comps}
@@ -2199,7 +2283,12 @@ class World:
             for d in sorted(sprang & set(comps) - stopped):
                 print(f"    [pan] view sprang back after the drag: reached the {d} limit")
                 stopped.add(d)    # moved, but the elastic border pulled it back: that's the limit
-        if AMAZE and response > 0.2 and not wrong_way and pan_gain_samples >= AMAZE_GAIN_SAMPLES:
+        if AMAZE and len(comps) == 1 and board is not None:
+            # at the limit the board's edge is on the centre line; anywhere else it isn't
+            # (or the board's edge was in view before and after and didn't move)
+            stopped = {direction} if (amaze_edge_state(board, direction) == "at"
+                                      or (es is not None and abs(es) < LIMIT_MAX_MOVE)) else set()
+        elif AMAZE and response > 0.2 and not wrong_way and pan_gain_samples >= AMAZE_GAIN_SAMPLES:
             for d in sorted(set(comps) - stopped):
                 predicted = pan_gain * max(0, abs(exp_of[d]) - TOUCH_SLOP)
                 if abs(exp_of[d]) >= PAN_GAIN_MIN_DRAG and abs(meas_of[d]) < AMAZE_CUT_SHORT * predicted:
@@ -2284,6 +2373,29 @@ class World:
 
     def integrate(self, mask, board):
         h, w = mask.shape
+        if AMAZE and self.seen is None and board is not None:
+            # Amaze boards can be long and thin: put the first view near the end of the map the
+            # board starts at (the map's middle left room for only ~60 rows either way)
+            # (the camera shows up to the centre line's distance past an edge: room for that too)
+            m = board.copy()
+            b0, b1 = band_rows()
+            if b1 >= b0:
+                m[b0:b1 + 1] = 0
+            bb = board_bbox(m)
+            lx, ly = AMAZE_LIMIT_X - ROI_X1, AMAZE_LIMIT_Y - ROI_Y1
+            placed = set()
+            for d, axis in (("TOP", "y"), ("LEFT", "x"), ("BOTTOM", "y"), ("RIGHT", "x")):
+                if bb is None or axis in placed or amaze_edge_state(board, d) is None:
+                    continue
+                v = {"LEFT": bb[0], "TOP": bb[1], "RIGHT": bb[2], "BOTTOM": bb[3]}[d]
+                start = {"TOP": ly + 300 - v, "LEFT": lx + 300 - v,
+                         "BOTTOM": self.SIZE - (h - 1 - ly) - 300 - v,
+                         "RIGHT": self.SIZE - (w - 1 - lx) - 300 - v}[d]
+                if axis == "y":
+                    self.oy = int(start)
+                else:
+                    self.ox = int(start)
+                placed.add(axis)
         if not (0 <= self.ox and self.ox + w <= self.SIZE and 0 <= self.oy and self.oy + h <= self.SIZE):
             print("[!] World map overflow, resetting.")
             self.reset(keep_level=True)
@@ -3731,6 +3843,11 @@ def pan_and_register(world, direction, amount=None):
     """Pan, then measure how far the view really moved (and whether it hit the camera limit).
     Returns the capture time of the measuring frame (later frames are the ones to analyse)."""
     global pan_fast
+    if AMAZE and "+" in direction:
+        t = None
+        for d in direction.split("+"):
+            t = pan_and_register(world, d, amount.get(d) if isinstance(amount, dict) else amount)
+        return t
     if recorder is not None:
         recorder.note("pans")
     t_start = time.time()

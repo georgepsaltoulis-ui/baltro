@@ -549,12 +549,17 @@ final class ScrcpyEngine implements FrameSource {
     /** One finger: down, moving and slowing down toward the end (steps of ~12 ms, like bot.py's
      *  ScrcpyLink.drag), held still, up: no speed left, so the game doesn't fling the board. */
     boolean drag(float x0, float y0, float x1, float y1, long moveMs, long holdMs) {
-        int steps = (int) Math.max(1, Math.round(moveMs / 12.0));
+        // A smooth finger: a move every ~8ms (the screen's 120Hz), each at its own time on the clock
+        // (sleeping a fixed step let small delays pile up: a jerky drag), and a gentle start and
+        // stop (smoothstep: no speed left when it stops, so the game doesn't fling).
+        int steps = (int) Math.max(1, Math.round(moveMs / 8.0));
         return inTurn(() -> {
             touch(DOWN, FINGER, x0, y0);
+            long t0 = SystemClock.uptimeMillis();
             for (int i = 1; i <= steps; i++) {
-                Thread.sleep(moveMs / steps);
-                double f = 1 - Math.pow(1 - (double) i / steps, 2);
+                long wait = t0 + moveMs * i / steps - SystemClock.uptimeMillis();
+                if (wait > 0) Thread.sleep(wait);
+                double t = (double) i / steps, f = t * t * (3 - 2 * t);
                 touch(MOVE, FINGER, (float) (x0 + (x1 - x0) * f), (float) (y0 + (y1 - y0) * f));
             }
             Thread.sleep(holdMs);
