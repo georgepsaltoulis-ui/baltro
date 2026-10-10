@@ -1484,15 +1484,74 @@ def band_rows():
     top, bottom = STATUS_BAR_BAND if status_bar_visible else HEADER_BAND
     return max(0, top - ROI_Y1), max(-1, bottom - ROI_Y1)
 
+def _off_grid(cen, keep, dots):
+    """Amaze: blobs (by label; keep = candidates, label 0 = background) that aren't grid dots - a
+    dot has another one grid step away, straight across or up/down; a speck of confetti or of a
+    banner's shadow sitting beside the board (it widened the board's outline) doesn't."""
+    out = np.zeros(len(cen), bool)
+    idx = np.nonzero(keep)[0]
+    idx = idx[idx > 0]
+    if len(idx) < 12:
+        return out
+    pts = cen[idx].astype(np.float32)
+    # grid step: median nearest-neighbour distance of a sample of the dots
+    sample = pts[np.linspace(0, len(pts) - 1, min(len(pts), 150)).astype(int)]
+    d = np.hypot(*(sample[:, None, :] - pts[None, :, :]).transpose(2, 0, 1))
+    d[d < 0.5] = 1e9
+    step = float(np.median(d.min(1)))
+    if step < 8:
+        return out
+    tol = max(2, int(round(0.2 * step)))
+    near = cv2.dilate(dots, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * tol + 1, 2 * tol + 1)))
+    h, w = dots.shape
+    on = np.zeros(len(pts), bool)
+    for ox, oy in ((step, 0), (-step, 0), (0, step), (0, -step)):
+        xx = np.round(pts[:, 0] + ox).astype(int)
+        yy = np.round(pts[:, 1] + oy).astype(int)
+        ok = (xx >= 0) & (xx < w) & (yy >= 0) & (yy < h)
+        on[ok] |= near[yy[ok], xx[ok]] > 0
+    if on.mean() < 0.6:
+        return out                                     # not a clear grid: leave it alone
+    out[idx[~on]] = True
+    return out
+
 def build_masks(roi_bgr, hsv=None, keep=None):
     """Line mask + board mask. keep (dict): also stores the line blobs' labels/stats for reuse."""
     if hsv is None:
         hsv = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2HSV)
     if AMAZE:
         # dark brown lines (red after a bounce) on a pale beige board; the grid dots are a pale tan
-        line_mask = cv2.bitwise_or(cv2.inRange(hsv, (0, 90, 0), (30, 255, 234)),
-                                   cv2.inRange(hsv, (160, 90, 0), (180, 255, 234)))
-        board = cv2.bitwise_or(cv2.inRange(hsv, (0, 45, 60), (30, 255, 255)), line_mask)
+        # Confetti (orange, yellow, red, salmon) falls over the board at "50% Complete!" and the
+        # end: the same hues but much brighter (V 240-255; lines ~110, red ~200, dots ~222).
+        line_mask = cv2.bitwise_or(cv2.inRange(hsv, (0, 90, 0), (30, 255, 215)),
+                                   cv2.inRange(hsv, (160, 90, 0), (180, 255, 215)))
+        dots = cv2.inRange(hsv, (0, 45, 60), (30, 255, 238))
+        dots = cv2.bitwise_and(dots, cv2.bitwise_not(line_mask))
+        # ...and any shaded piece that's darker: a blob much bigger than the grid's dots isn't one
+        n, lab, st, cen = cv2.connectedComponentsWithStats(dots, connectivity=8)
+        if n > 12:
+            areas = st[1:, cv2.CC_STAT_AREA]
+            typical = float(np.median(areas[areas >= 4])) if (areas >= 4).any() else 0.0
+            if typical:
+                def clear(labels):            # (only the few dropped blobs, each in its own box)
+                    for i in labels:
+                        x, y, bw, bh = st[i, :4]
+                        part = dots[y:y + bh, x:x + bw]
+                        part[lab[y:y + bh, x:x + bw] == i] = 0
+                drop = np.zeros(n, bool)
+                drop[1:] = areas > max(40.0, 3.0 * typical)
+                clear(np.nonzero(drop)[0])
+                # (specks much smaller than a dot - bits of line edges, gone after the opening
+                # below - would spoil the grid's spacing: not candidates)
+                cand = ~drop
+                cand[1:] &= areas >= max(2.0, 0.3 * typical)
+                clear(np.nonzero(_off_grid(cen, cand, dots))[0])
+        board = cv2.bitwise_or(dots, line_mask)
+        # the header (and a banner like "50% Complete!" over it: its emoji is arrow-coloured and
+        # pokes a few px below) is never board
+        b0, b1 = band_rows()
+        if b1 >= b0:
+            board[b0:b1 + 9] = 0
     else:
         v = cv2.extractChannel(hsv, 2)
         _, line_mask = cv2.threshold(v, LINE_V_THRESH, 255, cv2.THRESH_BINARY)
@@ -2974,9 +3033,15 @@ def analyze(frame, world):
     world.half_age = getattr(world, "half_age", 0) + 1
     cached = getattr(world, "half_cached", None) if world.half_age < 30 else None
     arrows, half = detect_arrows(mask, hsv, keep, half=cached)
-    world.half_cached = half
-    if cached is None:
-        world.half_age = 0
+    if cached is None and cv2.countNonZero(mask) < 500:
+        # Too little line in view to measure (plain dots, late in a level): that was a default,
+        # not a measurement. Cached, it hid every arrow for the next 30 frames - the bot swept
+        # past the last arrows "seeing" none. Measure again on the next frame instead.
+        world.half_cached = None
+    else:
+        world.half_cached = half
+        if cached is None:
+            world.half_age = 0
     # Arrows we tapped are flying out along their own lane. On some levels they keep the resting
     # colour (blue only briefly), so they'd look like new arrows: tapped again, remembered and
     # chased later, and blocking other lanes. A head moving down the lane of a recent tap, same
